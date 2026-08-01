@@ -13,6 +13,7 @@ export declare class MovenReporter {
     private maxRetries;
     private timeoutMs;
     constructor(apiKeyOrOptions?: string | MovenReporterOptions, endpoint?: string);
+    sendPayload(payload: any): Promise<boolean>;
     private fetchWithRetry;
     queryJudgeArbitrator(state: MovenRunState): Promise<{
         judgeModel: string;

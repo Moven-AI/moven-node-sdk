@@ -20,6 +20,22 @@ class MovenReporter {
             this.timeoutMs = 5000;
         }
     }
+    async sendPayload(payload) {
+        try {
+            const res = await this.fetchWithRetry(this.endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(this.apiKey ? { 'x-moven-api-key': this.apiKey } : {}),
+                },
+                body: JSON.stringify(payload),
+            });
+            return res.ok;
+        }
+        catch {
+            return false;
+        }
+    }
     async fetchWithRetry(url, init, retries = this.maxRetries) {
         let lastError;
         for (let attempt = 0; attempt <= retries; attempt++) {

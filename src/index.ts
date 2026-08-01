@@ -1,6 +1,8 @@
-// Core exports
 export { MovenRunState, DEFAULT_CHEAPER_MODEL_MAP } from './core/run-state';
 export type { MovenOptions, ToolCallLog } from './core/run-state';
+
+export { MovenCheckpointEngine } from './core/checkpoint';
+export type { CheckpointData } from './core/checkpoint';
 
 export { MovenHeuristicsEngine } from './core/heuristics';
 export type { HeuristicTripResult } from './core/heuristics';

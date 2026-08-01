@@ -29,6 +29,22 @@ export class MovenReporter {
     }
   }
 
+  public async sendPayload(payload: any): Promise<boolean> {
+    try {
+      const res = await this.fetchWithRetry(this.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.apiKey ? { 'x-moven-api-key': this.apiKey } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   private async fetchWithRetry(url: string, init: RequestInit, retries: number = this.maxRetries): Promise<Response> {
     let lastError: any;
     for (let attempt = 0; attempt <= retries; attempt++) {

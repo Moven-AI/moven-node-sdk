@@ -33,7 +33,7 @@ export interface MovenOptions {
   promptCostPerMillion?: number;
   completionCostPerMillion?: number;
   apiKey?: string;
-  endpoint?: string; // default: https://moven.ai/api/events or local endpoint
+  endpoint?: string; // default: https://moven.dev/api/events or local endpoint
   onKill?: (error: any) => void;
   onHallucination?: (info: { agentName: string; reason: string; toolName?: string; args?: any }) => void;
   customCheck?: (state: MovenRunState) => { tripped: boolean; reason: string } | null;

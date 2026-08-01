@@ -1,14 +1,24 @@
 {
-  "name": "@moven/sdk",
-  "version": "0.1.0",
+  "name": "moven-sdk",
+  "version": "0.1.1",
   "description": "The circuit breaker for AI agents. Detect runaway loops and cost spikes in real time.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
-    "test": "ts-node test/heuristics.test.ts"
+    "test": "ts-node test/heuristics.test.ts",
+    "prepublishOnly": "npm run build"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md"
+  ],
   "keywords": [
     "ai",
     "agents",

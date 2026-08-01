@@ -31,11 +31,11 @@ Observability platforms (LangSmith, Langfuse, Helicone) record what happened **a
 ## 📦 Installation
 
 ```bash
-npm install @moven/sdk
+npm install moven-sdk
 # or
-pnpm add @moven/sdk
+pnpm add moven-sdk
 # or
-yarn add @moven/sdk
+yarn add moven-sdk
 ```
 
 ---
@@ -47,7 +47,7 @@ yarn add @moven/sdk
 ```typescript
 import { generateText, tool } from 'ai';
 import { openai } from '@ai-sdk/openai';
-import { wrapToolsWithMoven } from '@moven/sdk';
+import { wrapToolsWithMoven } from 'moven-sdk';
 import { z } from 'zod';
 
 const tools = wrapToolsWithMoven({
@@ -76,7 +76,7 @@ const result = await generateText({
 ### 2. OpenAI SDK
 
 ```typescript
-import { wrapOpenAIToolRunner } from '@moven/sdk';
+import { wrapOpenAIToolRunner } from 'moven-sdk';
 import OpenAI from 'openai';
 
 const openai = new OpenAI();
@@ -93,7 +93,7 @@ const wrappedTools = wrapOpenAIToolRunner({
 ### 3. Anthropic Claude SDK
 
 ```typescript
-import { wrapAnthropicToolUse } from '@moven/sdk';
+import { wrapAnthropicToolUse } from 'moven-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 
 const wrappedTools = wrapAnthropicToolUse({
@@ -109,7 +109,7 @@ const wrappedTools = wrapAnthropicToolUse({
 ### 4. AWS Bedrock & Azure OpenAI
 
 ```typescript
-import { wrapBedrockTools, wrapAzureOpenAITools } from '@moven/sdk';
+import { wrapBedrockTools, wrapAzureOpenAITools } from 'moven-sdk';
 
 const safeBedrockTools = wrapBedrockTools({
   fetch_s3_object: async ({ bucket, key }) => { /* ... */ }
@@ -177,4 +177,4 @@ We welcome contributions from the AI community! Please see [CONTRIBUTING.md](CON
 
 ## 📜 License
 
-MIT © [Moven AI](https://moven.ai)
+MIT © [Moven AI](https://moven.dev)

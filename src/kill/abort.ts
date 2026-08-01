@@ -20,11 +20,37 @@ export class MovenKillHandler {
       console.warn(
         `\x1b[33m\x1b[1m⚡ [Moven AI] Auto-Fallback Activated:\x1b[0m \x1b[36mRouting agent '${state.agentName}' to cheaper model '${cheaperModel}' instead of terminating run.\x1b[0m`
       );
+
+      // Report fallback event asynchronously to dashboard and webhooks
+      if (reporter) {
+        const killError = new MovenKillError({
+          runId: state.runId,
+          heuristic: tripResult.heuristic || 'repeat_tool_call',
+          reason: `[Auto-Fallback to ${cheaperModel}] ${tripResult.reason || 'Circuit breaker tripped'}`,
+          toolName: tripResult.toolName,
+          toolArgs: tripResult.toolArgs,
+          metrics: tripResult.metrics || state.getMetrics(),
+        });
+        reporter.reportKillEvent(killError, state).catch(() => {});
+      }
+
+      if (state.options.onHallucination) {
+        try {
+          state.options.onHallucination({
+            agentName: state.agentName,
+            reason: tripResult.reason || 'Agent loop detected (fallback activated)',
+            toolName: tripResult.toolName,
+            args: tripResult.toolArgs,
+          });
+        } catch {}
+      }
+
       // Reset repeat call tracking for clean continuation under fallback model
       state.toolCalls = [];
       state.depth = Math.max(0, state.depth - 2);
       return { fallbackActivated: true };
     }
+
 
     // Already in fallback mode or auto-fallback disabled — execute kill
     await this.executeKill(tripResult, state, reporter);

@@ -111,26 +111,27 @@ export class MovenReporter {
       timestamp: new Date().toISOString(),
     };
 
-    if (!this.apiKey) {
-      console.log(`[Moven AI] Standalone Mode — Circuit Breaker Tripped! Run: ${state.runId} | Reason: ${error.reason}`);
-      return false;
-    }
-
+    // Note: If no API key is provided, still attempt local endpoint POST for dashboard telemetry & webhooks
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (this.apiKey) headers['x-moven-api-key'] = this.apiKey;
+
       const response = await this.fetchWithRetry(this.endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-moven-api-key': this.apiKey,
-        },
+        headers,
         body: JSON.stringify(payload),
       });
 
       return response.ok;
     } catch (err: any) {
-      console.warn(`[Moven AI] Failed to transmit kill event to backend: ${err.message}`);
+      if (!this.apiKey) {
+        console.log(`[Moven AI] Standalone Mode — Circuit Breaker Tripped! Run: ${state.runId} | Reason: ${error.reason}`);
+      } else {
+        console.warn(`[Moven AI] Failed to transmit kill event to backend: ${err.message}`);
+      }
       return false;
     }
+
   }
 
   /**

@@ -1,0 +1,35 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.wrapAnthropicToolUse = wrapAnthropicToolUse;
+const run_state_1 = require("../core/run-state");
+const heuristics_1 = require("../core/heuristics");
+const abort_1 = require("../kill/abort");
+const reporter_1 = require("../reporter");
+function wrapAnthropicToolUse(toolName, handler, options, sharedState) {
+    const optsWithProvider = { provider: 'anthropic', ...options };
+    const state = sharedState || new run_state_1.MovenRunState(optsWithProvider);
+    const reporter = new reporter_1.MovenReporter(options?.apiKey, options?.endpoint);
+    const wrapped = async (...args) => {
+        const log = state.recordToolCall(toolName, args[0]);
+        const check = heuristics_1.MovenHeuristicsEngine.evaluate(state);
+        if (check.tripped) {
+            await abort_1.MovenKillHandler.executeKill(check, state, reporter);
+        }
+        const start = Date.now();
+        try {
+            const res = await handler(...args);
+            state.recordToolResult(log, res, Date.now() - start);
+            const postCheck = heuristics_1.MovenHeuristicsEngine.evaluate(state);
+            if (postCheck.tripped) {
+                await abort_1.MovenKillHandler.executeKill(postCheck, state, reporter);
+            }
+            return res;
+        }
+        catch (err) {
+            if (err?.name === 'MovenKillError')
+                throw err;
+            throw err;
+        }
+    };
+    return wrapped;
+}

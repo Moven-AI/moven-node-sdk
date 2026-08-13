@@ -1,9 +1,15 @@
 export { MovenRunState, DEFAULT_CHEAPER_MODEL_MAP } from './core/run-state';
 export type { MovenOptions, ToolCallLog } from './core/run-state';
-export { MovenCheckpointEngine } from './core/checkpoint';
-export type { CheckpointData } from './core/checkpoint';
+export { MovenCheckpointManager } from './core/checkpoint';
+export type { AgentCheckpointState } from './core/checkpoint';
+export { MovenOvernightBurnGuard } from './core/burn-guard';
+export type { BurnGuardOptions, BurnGuardCheckResult } from './core/burn-guard';
+export { MovenSemanticCacheEngine } from './core/semantic-cache';
+export type { SemanticCacheOptions, CacheHitResult } from './core/semantic-cache';
 export { MovenHeuristicsEngine } from './core/heuristics';
 export type { HeuristicTripResult } from './core/heuristics';
+export { MovenHallucinationDetector } from './core/hallucination';
+export type { HallucinationResult } from './core/hallucination';
 export { MovenKillError } from './core/errors';
 export type { MovenKillMetrics, MovenHeuristicType } from './core/errors';
 export { MovenKillHandler } from './kill/abort';

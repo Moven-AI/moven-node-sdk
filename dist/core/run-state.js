@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenRunState = exports.DEFAULT_CHEAPER_MODEL_MAP = void 0;
 const crypto_1 = __importDefault(require("crypto"));
+const checkpoint_1 = require("./checkpoint");
 exports.DEFAULT_CHEAPER_MODEL_MAP = {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-3-haiku-20240307',
@@ -100,27 +101,56 @@ class MovenRunState {
             this.options.enableLlmJudgeArbitrator = newRules.enableLlmJudgeArbitrator;
     }
     getCheaperModel(providerOrModel) {
-        if (this.options.cheaperModel)
+        // 1. If user explicitly set cheaperModel, always use that
+        if (this.options.cheaperModel) {
             return this.options.cheaperModel;
-        const customMap = this.options.cheaperModelMap || {};
-        const key = (providerOrModel || this.options.modelAuthor || this.options.provider || '').toLowerCase();
-        // User-specified override takes priority
-        if (customMap[key])
-            return customMap[key];
-        if (exports.DEFAULT_CHEAPER_MODEL_MAP[key])
-            return exports.DEFAULT_CHEAPER_MODEL_MAP[key];
-        // For OpenRouter routing: prefix the cheaper model with the author
-        const routingLayer = (this.options.provider || '').toLowerCase();
-        const author = (this.options.modelAuthor || '').toLowerCase();
-        if (routingLayer === 'openrouter' && author) {
-            const bareModel = exports.DEFAULT_CHEAPER_MODEL_MAP[author];
-            if (bareModel)
-                return `${author}/${bareModel}`;
         }
-        if (this.options.judgeModel)
-            return this.options.judgeModel;
-        return 'google/gemini-2.5-flash-lite';
+        const customMap = this.options.cheaperModelMap || {};
+        const routingLayer = (this.options.provider || '').toLowerCase();
+        // 2. Derive the author/family from (in priority order):
+        //    a) explicit modelAuthor  b) explicit provider  c) parse from currentModel slug
+        let author = (this.options.modelAuthor || '').toLowerCase();
+        if (!author && routingLayer && routingLayer !== 'openrouter') {
+            author = routingLayer; // e.g. 'openai', 'anthropic', 'google'
+        }
+        if (!author && this.options.currentModel && this.options.currentModel.includes('/')) {
+            // e.g. "openai/gpt-4o" → "openai",  "meta-llama/llama-3-70b" → "meta-llama"
+            author = this.options.currentModel.split('/')[0].toLowerCase();
+        }
+        // 3. Also try a direct model-level lookup (e.g. 'gpt-4o' → 'gpt-4o-mini')
+        const bareCurrentModel = (this.options.currentModel || '').includes('/')
+            ? this.options.currentModel.split('/').slice(1).join('/')
+            : (this.options.currentModel || '');
+        // 4. Resolution order: customMap[author] → customMap[bareModel] → DEFAULT[author] → DEFAULT[bareModel]
+        let cheaperBare = (author && customMap[author]) ||
+            (bareCurrentModel && customMap[bareCurrentModel]) ||
+            (author && exports.DEFAULT_CHEAPER_MODEL_MAP[author]) ||
+            (bareCurrentModel && exports.DEFAULT_CHEAPER_MODEL_MAP[bareCurrentModel]) ||
+            '';
+        // 5. Build the final model ID based on the routing layer
+        if (routingLayer === 'openrouter') {
+            // OpenRouter needs full "author/model" slugs
+            if (cheaperBare) {
+                // If cheaperBare already contains a slash it's already namespaced
+                return cheaperBare.includes('/') ? cheaperBare : `${author}/${cheaperBare}`;
+            }
+            // Fallback to judge model on OpenRouter
+            return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
+        }
+        // 6. Native provider SDK (openai, anthropic, google, groq, mistral, cohere…)
+        //    needs BARE model IDs — strip any "author/" prefix
+        if (cheaperBare) {
+            return cheaperBare.includes('/') ? cheaperBare.split('/').slice(1).join('/') : cheaperBare;
+        }
+        // 7. Last resort: use the provider's default cheaper model or judge model
+        const providerFallback = author && exports.DEFAULT_CHEAPER_MODEL_MAP[author];
+        if (providerFallback) {
+            return providerFallback.includes('/') ? providerFallback.split('/').slice(1).join('/') : providerFallback;
+        }
+        // Absolute fallback
+        return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
     }
+    checkpointManager = new checkpoint_1.MovenCheckpointManager();
     recordToolCall(toolName, args) {
         const argsHash = this.hashArguments(toolName, args);
         const log = {
@@ -131,14 +161,28 @@ class MovenRunState {
         };
         this.toolCalls.push(log);
         this.depth += 1;
+        // Snapshot Ctrl+Z step checkpoint
+        this.checkpointManager.createCheckpoint(this.runId, this.agentId, this.depth, toolName, args, this.cumulativeCost);
         return log;
     }
-    recordToolResult(log, result, durationMs) {
-        log.result = result;
-        log.durationMs = durationMs || (Date.now() - log.timestamp);
-        // Hash turn state for no-progress heuristic
-        const turnHash = this.hashStateTurn(log.toolName, result);
-        this.stateHashes.push(turnHash);
+    recordToolResult(logOrResult, result, durationMs) {
+        let log;
+        let res;
+        if (result !== undefined || (logOrResult && typeof logOrResult === 'object' && 'toolName' in logOrResult && 'argsHash' in logOrResult)) {
+            log = logOrResult;
+            res = result;
+        }
+        else {
+            log = this.toolCalls[this.toolCalls.length - 1];
+            res = logOrResult;
+        }
+        if (log) {
+            log.result = res;
+            log.durationMs = durationMs || (Date.now() - log.timestamp);
+            // Hash turn state for no-progress heuristic
+            const turnHash = this.hashStateTurn(log.toolName, res);
+            this.stateHashes.push(turnHash);
+        }
     }
     addCost(cost) {
         this.cumulativeCost += cost;

@@ -12,6 +12,8 @@ export declare function wrapToolsWithMoven<T extends Record<string, any>>(tools:
 export declare function createMovenCircuitBreaker(options?: MovenOptions): {
     state: MovenRunState;
     reporter: MovenReporter;
+    updateSettings: (newOptions: Partial<MovenOptions>) => Promise<MovenOptions>;
+    syncWithCloud: () => Promise<MovenOptions>;
     wrapTools: <T extends Record<string, any>>(tools: T) => T & {
         tools: T;
         state: MovenRunState;

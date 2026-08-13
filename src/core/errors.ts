@@ -12,6 +12,7 @@ export type MovenHeuristicType =
   | 'depth_ceiling'
   | 'no_progress_loop'
   | 'llm_judge_arbitrator'
+  | 'ai_hallucination'
   | 'custom_rule';
 
 export class MovenKillError extends Error {

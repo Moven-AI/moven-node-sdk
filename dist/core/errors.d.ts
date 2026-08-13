@@ -5,7 +5,7 @@ export interface MovenKillMetrics {
     depth: number;
     durationMs: number;
 }
-export type MovenHeuristicType = 'repeat_tool_call' | 'cost_ceiling' | 'depth_ceiling' | 'no_progress_loop' | 'llm_judge_arbitrator' | 'custom_rule';
+export type MovenHeuristicType = 'repeat_tool_call' | 'cost_ceiling' | 'depth_ceiling' | 'no_progress_loop' | 'llm_judge_arbitrator' | 'ai_hallucination' | 'custom_rule';
 export declare class MovenKillError extends Error {
     readonly runId: string;
     readonly heuristic: MovenHeuristicType;

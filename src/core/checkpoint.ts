@@ -1,102 +1,86 @@
-import { MovenRunState, MovenOptions } from './run-state';
-import { MovenReporter } from '../reporter';
-
-export interface CheckpointData {
+export interface AgentCheckpointState {
   stepIndex: number;
-  stepName: string;
-  stateSnapshot: any;
-  model?: string;
-  systemPrompt?: string;
+  traceId: string;
+  agentId: string;
+  lastToolCalled?: string;
+  lastToolArgs?: any;
+  messagesSnapshot?: any[];
+  memorySnapshot?: Record<string, any>;
+  cumulativeCost: number;
+  parentCheckpointId?: string;
+  isForked?: boolean;
+  forkLabel?: string;
+  timestamp: number;
 }
 
-export class MovenCheckpointEngine {
-  private state: MovenRunState;
-  private checkpoints: Map<number, CheckpointData> = new Map();
-  private reporter?: MovenReporter;
+export class MovenCheckpointManager {
+  private checkpoints: AgentCheckpointState[] = [];
 
-  constructor(state: MovenRunState, reporter?: MovenReporter) {
-    this.state = state;
-    this.reporter = reporter;
-  }
+  public createCheckpoint(
+    traceId: string,
+    agentId: string,
+    stepIndex: number,
+    lastToolCalled?: string,
+    lastToolArgs?: any,
+    cumulativeCost: number = 0,
+    messagesSnapshot?: any[],
+    memorySnapshot?: Record<string, any>
+  ): AgentCheckpointState {
+    const parentId = this.checkpoints.length > 0 
+      ? `ckpt_${traceId}_step_${this.checkpoints[this.checkpoints.length - 1].stepIndex}`
+      : undefined;
 
-  // 1. CHECKPOINT: Save execution state at current step
-  public checkpoint(stepIndex: number, stepName: string, stateSnapshot: any, model?: string, systemPrompt?: string): CheckpointData {
-    const cp: CheckpointData = {
+    const checkpoint: AgentCheckpointState = {
       stepIndex,
-      stepName,
-      stateSnapshot,
-      model: model || this.state.activeModel,
-      systemPrompt,
+      traceId,
+      agentId,
+      lastToolCalled,
+      lastToolArgs,
+      messagesSnapshot,
+      memorySnapshot,
+      cumulativeCost,
+      parentCheckpointId: parentId,
+      timestamp: Date.now(),
     };
-    this.checkpoints.set(stepIndex, cp);
 
-    // Stream checkpoint to telemetry server asynchronously
-    if (this.reporter) {
-      this.reporter.sendPayload({
-        event: 'checkpoint',
-        runId: this.state.runId,
-        agentId: this.state.agentId,
-        agentName: this.state.agentName,
-        stepIndex,
-        stepName,
-        stateSnapshot,
-        model: cp.model,
-        timestamp: Date.now(),
-      }).catch(() => {});
-    }
-
-    return cp;
+    this.checkpoints.push(checkpoint);
+    return checkpoint;
   }
 
-  // 2. REWIND (Ctrl+Z): Get snapshot to roll back state to stepIndex
-  public rewind(stepIndex: number): CheckpointData | null {
-    const cp = this.checkpoints.get(stepIndex);
-    if (!cp) return null;
-
-    // Prune tool calls & depth beyond stepIndex
-    this.state.depth = stepIndex;
-    this.state.cleanTurnsCount = 0;
-
-    if (this.reporter) {
-      this.reporter.sendPayload({
-        event: 'rewind',
-        runId: this.state.runId,
-        agentId: this.state.agentId,
-        agentName: this.state.agentName,
-        stepIndex,
-        timestamp: Date.now(),
-      }).catch(() => {});
-    }
-
-    return cp;
+  public getCheckpoints(): AgentCheckpointState[] {
+    return [...this.checkpoints];
   }
 
-  // 3. FORK: Create a new branch of execution from stepIndex with overrides
-  public fork(stepIndex: number, overrides: { model?: string; disableTools?: string[]; systemPrompt?: string }): { newRunId: string; checkpoint: CheckpointData | null } {
-    const cp = this.rewind(stepIndex);
-    const newRunId = `fork_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  public rewindToStep(stepIndex: number): AgentCheckpointState | null {
+    const idx = this.checkpoints.findIndex(c => c.stepIndex === stepIndex);
+    if (idx === -1) return null;
 
-    if (overrides.model) {
-      this.state.activeModel = overrides.model;
-    }
-
-    if (this.reporter) {
-      this.reporter.sendPayload({
-        event: 'fork',
-        runId: this.state.runId,
-        newRunId,
-        agentId: this.state.agentId,
-        agentName: this.state.agentName,
-        stepIndex,
-        overrides,
-        timestamp: Date.now(),
-      }).catch(() => {});
-    }
-
-    return { newRunId, checkpoint: cp };
+    // Truncate future checkpoints to rewind to step N
+    const target = this.checkpoints[idx];
+    this.checkpoints = this.checkpoints.slice(0, idx + 1);
+    return target;
   }
 
-  public getCheckpoints(): CheckpointData[] {
-    return Array.from(this.checkpoints.values()).sort((a, b) => a.stepIndex - b.stepIndex);
+  public forkFromStep(
+    stepIndex: number,
+    forkLabel: string,
+    updatedArgs?: any
+  ): AgentCheckpointState | null {
+    const target = this.rewindToStep(stepIndex);
+    if (!target) return null;
+
+    const newStepIndex = target.stepIndex + 1;
+    const forkedCheckpoint: AgentCheckpointState = {
+      ...target,
+      stepIndex: newStepIndex,
+      parentCheckpointId: `ckpt_${target.traceId}_step_${target.stepIndex}`,
+      lastToolArgs: updatedArgs || target.lastToolArgs,
+      isForked: true,
+      forkLabel,
+      timestamp: Date.now(),
+    };
+
+    this.checkpoints.push(forkedCheckpoint);
+    return forkedCheckpoint;
   }
 }

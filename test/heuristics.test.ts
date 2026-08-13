@@ -65,14 +65,27 @@ async function runTests() {
       },
     };
 
-    const { tools } = wrapToolsWithMoven(dummyTools, {
+    // Use distinct args each call so no-progress doesn't fire — only repeat_tool_call
+    let callCount = 0;
+    const dummyToolsDiff = {
+      query_weather: {
+        execute: async (_args: { city: string }) => {
+          callCount++;
+          // Return different results to avoid no-progress hash match
+          return { temp: `${70 + callCount}F`, city: _args.city };
+        },
+      },
+    };
+
+    const { tools } = wrapToolsWithMoven(dummyToolsDiff, {
       maxRepeatCalls: 3,
       agentName: 'weather-bot-test',
+      enableLlmJudgeArbitrator: false,
+      autoFallbackCheaperModel: false, // Disable fallback so trip throws directly
     });
 
     let caughtError: MovenKillError | null = null;
     try {
-      // Execute 3 repeat calls
       await tools.query_weather.execute({ city: 'San Francisco' });
       await tools.query_weather.execute({ city: 'San Francisco' });
       await tools.query_weather.execute({ city: 'San Francisco' });
@@ -86,6 +99,43 @@ async function runTests() {
     assert.strictEqual(caughtError?.heuristic, 'repeat_tool_call');
     assert.strictEqual(caughtError?.toolName, 'query_weather');
     console.log('  ✅ Passed Adapter Interception & MovenKillError Throw\n');
+  }
+
+  // Test 4b: Auto-fallback activates instead of throwing when enabled
+  {
+    console.log('Test 4b: Auto-Fallback Cheaper Model Activation');
+    let callCount4b = 0;
+    const dummyToolsFallback = {
+      query_data: {
+        execute: async (_args: { key: string }) => {
+          callCount4b++;
+          return { value: callCount4b }; // Different results — no no-progress trip
+        },
+      },
+    };
+
+    const { tools: fallbackTools, state: fallbackState } = wrapToolsWithMoven(dummyToolsFallback, {
+      maxRepeatCalls: 3,
+      agentName: 'fallback-test-agent',
+      provider: 'openai',
+      currentModel: 'gpt-4o',
+      enableLlmJudgeArbitrator: false,
+      autoFallbackCheaperModel: true, // Fallback should activate, NOT throw
+    });
+
+    let threwKillError = false;
+    try {
+      await fallbackTools.query_data.execute({ key: 'test' });
+      await fallbackTools.query_data.execute({ key: 'test' });
+      await fallbackTools.query_data.execute({ key: 'test' });
+    } catch (err: any) {
+      if (err instanceof MovenKillError) threwKillError = true;
+    }
+
+    assert.strictEqual(threwKillError, false, 'Should NOT throw — auto-fallback should activate');
+    assert.strictEqual(fallbackState.isFallbackActive, true, 'Fallback should be active');
+    assert.strictEqual(fallbackState.activeModel, 'gpt-4o-mini', `Expected gpt-4o-mini, got ${fallbackState.activeModel}`);
+    console.log(`  ✅ Passed Auto-Fallback (active model: ${fallbackState.activeModel})\n`);
   }
 
   // Test 5: No-Progress Turn Hash Detection
@@ -109,18 +159,73 @@ async function runTests() {
     console.log('  ✅ Passed No-Progress Turn Hash Detection\n');
   }
 
-  // Test 6: Cheaper Model Resolution & OpenRouter Mapping
+  // Test 6: Explicit cheaperModel override always wins
   {
-    console.log('Test 6: Cheaper Fallback Model Resolution');
+    console.log('Test 6: Explicit cheaperModel Override');
     const state = new MovenRunState({ 
       provider: 'openrouter', 
       modelAuthor: 'openai',
       cheaperModel: 'openai/gpt-5.6-luna-pro' 
     });
+    assert.strictEqual(state.getCheaperModel(), 'openai/gpt-5.6-luna-pro');
+    console.log('  ✅ Passed Explicit cheaperModel Override\n');
+  }
 
-    const cheaperModel = state.getCheaperModel();
-    assert.strictEqual(cheaperModel, 'openai/gpt-5.6-luna-pro');
-    console.log('  ✅ Passed Cheaper Fallback Model Resolution\n');
+  // ── New Tests: Provider Model Mapping ─────────────────────────────────────
+
+  // Test 7: Native OpenAI provider → bare model ID
+  {
+    console.log('Test 7: OpenAI provider → bare gpt-4o-mini');
+    const state = new MovenRunState({ provider: 'openai', currentModel: 'gpt-4o' });
+    const m = state.getCheaperModel();
+    assert.strictEqual(m, 'gpt-4o-mini', `Expected gpt-4o-mini, got ${m}`);
+    console.log('  ✅ Passed OpenAI bare model mapping\n');
+  }
+
+  // Test 8: Native Anthropic provider → bare model ID
+  {
+    console.log('Test 8: Anthropic provider → bare claude-3-haiku');
+    const state = new MovenRunState({ provider: 'anthropic', currentModel: 'claude-3-5-sonnet-20240620' });
+    const m = state.getCheaperModel();
+    assert.strictEqual(m, 'claude-3-haiku-20240307', `Expected claude-3-haiku-20240307, got ${m}`);
+    console.log('  ✅ Passed Anthropic bare model mapping\n');
+  }
+
+  // Test 9: Native Google provider → bare model ID
+  {
+    console.log('Test 9: Google provider → gemini-2.5-flash-lite');
+    const state = new MovenRunState({ provider: 'google', currentModel: 'gemini-1.5-pro' });
+    const m = state.getCheaperModel();
+    assert.strictEqual(m, 'gemini-2.5-flash-lite', `Expected gemini-2.5-flash-lite, got ${m}`);
+    console.log('  ✅ Passed Google bare model mapping\n');
+  }
+
+  // Test 10: OpenRouter provider → namespaced "author/model" slug
+  {
+    console.log('Test 10: OpenRouter provider → namespaced openai/gpt-4o-mini');
+    const state = new MovenRunState({ provider: 'openrouter', currentModel: 'openai/gpt-4o' });
+    const m = state.getCheaperModel();
+    assert.strictEqual(m, 'openai/gpt-4o-mini', `Expected openai/gpt-4o-mini, got ${m}`);
+    console.log('  ✅ Passed OpenRouter namespaced model mapping\n');
+  }
+
+  // Test 11: No provider set — parse author from currentModel slug
+  {
+    console.log('Test 11: No provider → parse author from currentModel slug');
+    const state = new MovenRunState({ currentModel: 'openai/gpt-4o' });
+    const m = state.getCheaperModel();
+    // No slash-based provider → should return bare name
+    assert.strictEqual(m, 'gpt-4o-mini', `Expected gpt-4o-mini, got ${m}`);
+    console.log('  ✅ Passed auto-parse author from currentModel\n');
+  }
+
+  // Test 12: Groq provider → bare llama model
+  {
+    console.log('Test 12: Groq provider → bare llama-3.1-8b-instant');
+    const state = new MovenRunState({ provider: 'groq', currentModel: 'llama-3.3-70b-versatile' });
+    const m = state.getCheaperModel();
+    assert.strictEqual(m, 'llama-3.1-8b-instant', `Expected llama-3.1-8b-instant, got ${m}`);
+    console.log('  ✅ Passed Groq bare model mapping\n');
   }
 
   console.log('🎉 ALL HEURISTICS TESTS PASSED SUCCESSFULLY!');

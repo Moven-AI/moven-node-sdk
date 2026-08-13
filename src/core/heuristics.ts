@@ -1,5 +1,7 @@
 import { MovenRunState } from './run-state';
 import { MovenHeuristicType, MovenKillMetrics } from './errors';
+import { MovenOvernightBurnGuard } from './burn-guard';
+import { MovenHallucinationDetector } from './hallucination';
 
 export interface HeuristicTripResult {
   tripped: boolean;
@@ -13,6 +15,33 @@ export interface HeuristicTripResult {
 export class MovenHeuristicsEngine {
   public static evaluate(state: MovenRunState): HeuristicTripResult {
     const opts = state.options;
+
+    // 0. Overnight Burn Guard ($2000 Loss Prevention Engine Check)
+    const burnGuardResult = MovenOvernightBurnGuard.evaluate(state);
+    if (burnGuardResult.tripped) {
+      const lastCall = state.toolCalls[state.toolCalls.length - 1];
+      return {
+        tripped: true,
+        heuristic: 'custom_rule',
+        reason: burnGuardResult.reason || 'Overnight Burn Guard limit exceeded',
+        toolName: lastCall?.toolName,
+        toolArgs: lastCall?.args,
+        metrics: state.getMetrics(),
+      };
+    }
+
+    // 0.5. Real-Time AI Hallucination Safeguard Check
+    const hallucinationResult = MovenHallucinationDetector.evaluate(state);
+    if (hallucinationResult.tripped) {
+      return {
+        tripped: true,
+        heuristic: 'ai_hallucination',
+        reason: hallucinationResult.reason,
+        toolName: hallucinationResult.toolName,
+        toolArgs: hallucinationResult.toolArgs,
+        metrics: state.getMetrics(),
+      };
+    }
 
     // 1. Repeat Call Detection
     const repeatCount = state.getRecentRepeatCallsCount(opts.repeatTimeWindowMs);

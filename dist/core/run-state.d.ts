@@ -1,4 +1,7 @@
 import { MovenKillMetrics } from './errors';
+import { BurnGuardOptions } from './burn-guard';
+import { SemanticCacheOptions } from './semantic-cache';
+import { MovenCheckpointManager } from './checkpoint';
 export interface ToolCallLog {
     toolName: string;
     args: any;
@@ -14,6 +17,7 @@ export interface MovenOptions {
     framework?: string;
     version?: string;
     tags?: string[];
+    allowedTools?: string[];
     maxRepeatCalls?: number;
     repeatTimeWindowMs?: number;
     maxCostDollar?: number;
@@ -27,6 +31,8 @@ export interface MovenOptions {
     cheaperModelMap?: Record<string, string>;
     autoFallbackCheaperModel?: boolean;
     enableLlmJudgeArbitrator?: boolean;
+    burnGuard?: BurnGuardOptions;
+    semanticCache?: SemanticCacheOptions;
     promptCostPerMillion?: number;
     completionCostPerMillion?: number;
     apiKey?: string;
@@ -66,8 +72,9 @@ export declare class MovenRunState {
     registerCleanTurn(): boolean;
     updateOptions(newRules: Partial<MovenOptions>): void;
     getCheaperModel(providerOrModel?: string): string;
+    readonly checkpointManager: MovenCheckpointManager;
     recordToolCall(toolName: string, args: any): ToolCallLog;
-    recordToolResult(log: ToolCallLog, result: any, durationMs?: number): void;
+    recordToolResult(logOrResult: ToolCallLog | any, result?: any, durationMs?: number): void;
     addCost(cost: number): void;
     getMetrics(): MovenKillMetrics;
     getRecentRepeatCallsCount(timeWindowMs?: number): number;

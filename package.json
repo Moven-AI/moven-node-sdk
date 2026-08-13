@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "ts-node test/heuristics.test.ts",
+    "test": "ts-node test/heuristics.test.ts && ts-node test/burn-guard.test.ts && ts-node test/hallucination.test.ts",
     "prepublishOnly": "npm run build"
   },
   "files": [

@@ -88,6 +88,15 @@ export function createMovenCircuitBreaker(options?: MovenOptions) {
   return {
     state,
     reporter,
+    updateSettings: async (newOptions: Partial<MovenOptions>) => {
+      state.updateOptions(newOptions);
+      await reporter.reportRunStart(state);
+      return state.options;
+    },
+    syncWithCloud: async () => {
+      await reporter.reportRunStart(state);
+      return state.options;
+    },
     wrapTools: <T extends Record<string, any>>(tools: T) => {
       const res = wrapToolsWithMoven(tools, options);
       return {

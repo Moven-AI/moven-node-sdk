@@ -1,5 +1,8 @@
 import crypto from 'crypto';
 import { MovenKillMetrics } from './errors';
+import { BurnGuardOptions } from './burn-guard';
+import { SemanticCacheOptions } from './semantic-cache';
+import { MovenCheckpointManager } from './checkpoint';
 
 export interface ToolCallLog {
   toolName: string;
@@ -17,6 +20,7 @@ export interface MovenOptions {
   framework?: string; // Agent framework (e.g. 'LangGraph / LangChain', 'Vercel AI SDK')
   version?: string; // Agent version identifier
   tags?: string[]; // Environment or category tags
+  allowedTools?: string[]; // Allowed tool names schema for hallucination detection
   maxRepeatCalls?: number; // default: 5
   repeatTimeWindowMs?: number; // default: 60000 (60s)
   maxCostDollar?: number; // default: 2.00
@@ -30,6 +34,8 @@ export interface MovenOptions {
   cheaperModelMap?: Record<string, string>; // Mapping of provider/primary model -> cheaper model
   autoFallbackCheaperModel?: boolean; // default: true
   enableLlmJudgeArbitrator?: boolean; // default: true
+  burnGuard?: BurnGuardOptions; // Overnight Burn Guard ($2000 loss prevention engine)
+  semanticCache?: SemanticCacheOptions; // Semantic caching engine options
   promptCostPerMillion?: number;
   completionCostPerMillion?: number;
   apiKey?: string;
@@ -132,25 +138,66 @@ export class MovenRunState {
   }
 
   public getCheaperModel(providerOrModel?: string): string {
-    if (this.options.cheaperModel) return this.options.cheaperModel;
-    const customMap = this.options.cheaperModelMap || {};
-    const key = (providerOrModel || this.options.modelAuthor || this.options.provider || '').toLowerCase();
-    
-    // User-specified override takes priority
-    if (customMap[key]) return customMap[key];
-    if (DEFAULT_CHEAPER_MODEL_MAP[key]) return DEFAULT_CHEAPER_MODEL_MAP[key];
-    
-    // For OpenRouter routing: prefix the cheaper model with the author
-    const routingLayer = (this.options.provider || '').toLowerCase();
-    const author = (this.options.modelAuthor || '').toLowerCase();
-    if (routingLayer === 'openrouter' && author) {
-      const bareModel = DEFAULT_CHEAPER_MODEL_MAP[author];
-      if (bareModel) return `${author}/${bareModel}`;
+    // 1. If user explicitly set cheaperModel, always use that
+    if (this.options.cheaperModel) {
+      return this.options.cheaperModel;
     }
-    
-    if (this.options.judgeModel) return this.options.judgeModel;
-    return 'google/gemini-2.5-flash-lite';
+
+    const customMap = this.options.cheaperModelMap || {};
+    const routingLayer = (this.options.provider || '').toLowerCase();
+
+    // 2. Derive the author/family from (in priority order):
+    //    a) explicit modelAuthor  b) explicit provider  c) parse from currentModel slug
+    let author = (this.options.modelAuthor || '').toLowerCase();
+    if (!author && routingLayer && routingLayer !== 'openrouter') {
+      author = routingLayer; // e.g. 'openai', 'anthropic', 'google'
+    }
+    if (!author && this.options.currentModel && this.options.currentModel.includes('/')) {
+      // e.g. "openai/gpt-4o" → "openai",  "meta-llama/llama-3-70b" → "meta-llama"
+      author = this.options.currentModel.split('/')[0].toLowerCase();
+    }
+
+    // 3. Also try a direct model-level lookup (e.g. 'gpt-4o' → 'gpt-4o-mini')
+    const bareCurrentModel = (this.options.currentModel || '').includes('/')
+      ? this.options.currentModel!.split('/').slice(1).join('/')
+      : (this.options.currentModel || '');
+
+    // 4. Resolution order: customMap[author] → customMap[bareModel] → DEFAULT[author] → DEFAULT[bareModel]
+    let cheaperBare =
+      (author && customMap[author]) ||
+      (bareCurrentModel && customMap[bareCurrentModel]) ||
+      (author && DEFAULT_CHEAPER_MODEL_MAP[author]) ||
+      (bareCurrentModel && DEFAULT_CHEAPER_MODEL_MAP[bareCurrentModel]) ||
+      '';
+
+    // 5. Build the final model ID based on the routing layer
+    if (routingLayer === 'openrouter') {
+      // OpenRouter needs full "author/model" slugs
+      if (cheaperBare) {
+        // If cheaperBare already contains a slash it's already namespaced
+        return cheaperBare.includes('/') ? cheaperBare : `${author}/${cheaperBare}`;
+      }
+      // Fallback to judge model on OpenRouter
+      return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
+    }
+
+    // 6. Native provider SDK (openai, anthropic, google, groq, mistral, cohere…)
+    //    needs BARE model IDs — strip any "author/" prefix
+    if (cheaperBare) {
+      return cheaperBare.includes('/') ? cheaperBare.split('/').slice(1).join('/') : cheaperBare;
+    }
+
+    // 7. Last resort: use the provider's default cheaper model or judge model
+    const providerFallback = author && DEFAULT_CHEAPER_MODEL_MAP[author];
+    if (providerFallback) {
+      return providerFallback.includes('/') ? providerFallback.split('/').slice(1).join('/') : providerFallback;
+    }
+
+    // Absolute fallback
+    return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
   }
+
+  public readonly checkpointManager = new MovenCheckpointManager();
 
   public recordToolCall(toolName: string, args: any): ToolCallLog {
     const argsHash = this.hashArguments(toolName, args);
@@ -162,16 +209,40 @@ export class MovenRunState {
     };
     this.toolCalls.push(log);
     this.depth += 1;
+
+    // Snapshot Ctrl+Z step checkpoint
+    this.checkpointManager.createCheckpoint(
+      this.runId,
+      this.agentId,
+      this.depth,
+      toolName,
+      args,
+      this.cumulativeCost
+    );
+
     return log;
   }
 
-  public recordToolResult(log: ToolCallLog, result: any, durationMs?: number) {
-    log.result = result;
-    log.durationMs = durationMs || (Date.now() - log.timestamp);
-    
-    // Hash turn state for no-progress heuristic
-    const turnHash = this.hashStateTurn(log.toolName, result);
-    this.stateHashes.push(turnHash);
+  public recordToolResult(logOrResult: ToolCallLog | any, result?: any, durationMs?: number) {
+    let log: ToolCallLog;
+    let res: any;
+
+    if (result !== undefined || (logOrResult && typeof logOrResult === 'object' && 'toolName' in logOrResult && 'argsHash' in logOrResult)) {
+      log = logOrResult as ToolCallLog;
+      res = result;
+    } else {
+      log = this.toolCalls[this.toolCalls.length - 1];
+      res = logOrResult;
+    }
+
+    if (log) {
+      log.result = res;
+      log.durationMs = durationMs || (Date.now() - log.timestamp);
+      
+      // Hash turn state for no-progress heuristic
+      const turnHash = this.hashStateTurn(log.toolName, res);
+      this.stateHashes.push(turnHash);
+    }
   }
 
   public addCost(cost: number) {

@@ -1,9 +1,36 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenHeuristicsEngine = void 0;
+const burn_guard_1 = require("./burn-guard");
+const hallucination_1 = require("./hallucination");
 class MovenHeuristicsEngine {
     static evaluate(state) {
         const opts = state.options;
+        // 0. Overnight Burn Guard ($2000 Loss Prevention Engine Check)
+        const burnGuardResult = burn_guard_1.MovenOvernightBurnGuard.evaluate(state);
+        if (burnGuardResult.tripped) {
+            const lastCall = state.toolCalls[state.toolCalls.length - 1];
+            return {
+                tripped: true,
+                heuristic: 'custom_rule',
+                reason: burnGuardResult.reason || 'Overnight Burn Guard limit exceeded',
+                toolName: lastCall?.toolName,
+                toolArgs: lastCall?.args,
+                metrics: state.getMetrics(),
+            };
+        }
+        // 0.5. Real-Time AI Hallucination Safeguard Check
+        const hallucinationResult = hallucination_1.MovenHallucinationDetector.evaluate(state);
+        if (hallucinationResult.tripped) {
+            return {
+                tripped: true,
+                heuristic: 'ai_hallucination',
+                reason: hallucinationResult.reason,
+                toolName: hallucinationResult.toolName,
+                toolArgs: hallucinationResult.toolArgs,
+                metrics: state.getMetrics(),
+            };
+        }
         // 1. Repeat Call Detection
         const repeatCount = state.getRecentRepeatCallsCount(opts.repeatTimeWindowMs);
         if (repeatCount >= (opts.maxRepeatCalls || 5)) {

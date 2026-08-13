@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenReporter = void 0;
+const run_state_1 = require("./core/run-state");
 class MovenReporter {
     apiKey;
     endpoint;
@@ -173,7 +174,7 @@ class MovenReporter {
                 headers,
                 body: JSON.stringify(payload),
             }, 2);
-            // If backend returns updated rules, apply them to the running state
+            // If backend returns updated rules, overwrite local state with cloud settings
             if (res.ok) {
                 try {
                     const data = await res.json();
@@ -187,6 +188,9 @@ class MovenReporter {
                             autoFallbackCheaperModel: data.agentConfig.auto_fallback_cheaper_model,
                             enableLlmJudgeArbitrator: data.agentConfig.enable_llm_judge_arbitrator,
                         });
+                    }
+                    if (data.globalCheaperModelMap) {
+                        Object.assign(run_state_1.DEFAULT_CHEAPER_MODEL_MAP, data.globalCheaperModelMap);
                     }
                 }
                 catch {

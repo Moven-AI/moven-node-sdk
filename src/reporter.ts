@@ -1,5 +1,5 @@
 import { MovenKillError } from './core/errors';
-import { MovenRunState } from './core/run-state';
+import { MovenRunState, DEFAULT_CHEAPER_MODEL_MAP } from './core/run-state';
 
 export interface MovenReporterOptions {
   apiKey?: string;
@@ -190,7 +190,7 @@ export class MovenReporter {
         body: JSON.stringify(payload),
       }, 2);
 
-      // If backend returns updated rules, apply them to the running state
+      // If backend returns updated rules, overwrite local state with cloud settings
       if (res.ok) {
         try {
           const data = await res.json();
@@ -204,6 +204,9 @@ export class MovenReporter {
               autoFallbackCheaperModel: data.agentConfig.auto_fallback_cheaper_model,
               enableLlmJudgeArbitrator: data.agentConfig.enable_llm_judge_arbitrator,
             });
+          }
+          if (data.globalCheaperModelMap) {
+            Object.assign(DEFAULT_CHEAPER_MODEL_MAP, data.globalCheaperModelMap);
           }
         } catch {
           // Response may not be JSON, ignore

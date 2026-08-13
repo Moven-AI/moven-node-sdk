@@ -30,17 +30,13 @@ function wrapSingleAutoGenTool(toolDef, state, reporter) {
             const log = state.recordToolCall(fnName, args[0] || args);
             state.addCost(0.01);
             const check = heuristics_1.MovenHeuristicsEngine.evaluate(state);
-            if (check.tripped) {
-                await abort_1.MovenKillHandler.executeKill(check, state, reporter);
-            }
+            await abort_1.MovenKillHandler.handleTripResult(check, state, reporter);
             const start = Date.now();
             try {
                 const res = await toolDef(...args);
                 state.recordToolResult(log, res, Date.now() - start);
                 const postCheck = heuristics_1.MovenHeuristicsEngine.evaluate(state);
-                if (postCheck.tripped) {
-                    await abort_1.MovenKillHandler.executeKill(postCheck, state, reporter);
-                }
+                await abort_1.MovenKillHandler.handleTripResult(postCheck, state, reporter);
                 return res;
             }
             catch (err) {
@@ -61,17 +57,13 @@ function wrapSingleAutoGenTool(toolDef, state, reporter) {
         const log = state.recordToolCall(toolName, args[0] || args);
         state.addCost(0.01);
         const check = heuristics_1.MovenHeuristicsEngine.evaluate(state);
-        if (check.tripped) {
-            await abort_1.MovenKillHandler.executeKill(check, state, reporter);
-        }
+        await abort_1.MovenKillHandler.handleTripResult(check, state, reporter);
         const start = Date.now();
         try {
             const res = await originalFn.call(toolDef, ...args);
             state.recordToolResult(log, res, Date.now() - start);
             const postCheck = heuristics_1.MovenHeuristicsEngine.evaluate(state);
-            if (postCheck.tripped) {
-                await abort_1.MovenKillHandler.executeKill(postCheck, state, reporter);
-            }
+            await abort_1.MovenKillHandler.handleTripResult(postCheck, state, reporter);
             return res;
         }
         catch (err) {

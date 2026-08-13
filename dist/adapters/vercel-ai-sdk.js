@@ -75,6 +75,9 @@ function createMovenCircuitBreaker(options) {
     return {
         state,
         reporter,
+        getModel: () => state.activeModel,
+        getActiveModel: () => state.activeModel,
+        isFallback: () => state.isFallbackActive,
         updateSettings: async (newOptions) => {
             state.updateOptions(newOptions);
             await reporter.reportRunStart(state);

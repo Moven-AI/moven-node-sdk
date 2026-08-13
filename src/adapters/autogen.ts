@@ -37,9 +37,7 @@ function wrapSingleAutoGenTool(toolDef: any, state: MovenRunState, reporter: Mov
       state.addCost(0.01);
 
       const check = MovenHeuristicsEngine.evaluate(state);
-      if (check.tripped) {
-        await MovenKillHandler.executeKill(check, state, reporter);
-      }
+      await MovenKillHandler.handleTripResult(check, state, reporter);
 
       const start = Date.now();
       try {
@@ -47,9 +45,7 @@ function wrapSingleAutoGenTool(toolDef: any, state: MovenRunState, reporter: Mov
         state.recordToolResult(log, res, Date.now() - start);
 
         const postCheck = MovenHeuristicsEngine.evaluate(state);
-        if (postCheck.tripped) {
-          await MovenKillHandler.executeKill(postCheck, state, reporter);
-        }
+        await MovenKillHandler.handleTripResult(postCheck, state, reporter);
 
         return res;
       } catch (err: any) {
@@ -72,9 +68,7 @@ function wrapSingleAutoGenTool(toolDef: any, state: MovenRunState, reporter: Mov
     state.addCost(0.01);
 
     const check = MovenHeuristicsEngine.evaluate(state);
-    if (check.tripped) {
-      await MovenKillHandler.executeKill(check, state, reporter);
-    }
+    await MovenKillHandler.handleTripResult(check, state, reporter);
 
     const start = Date.now();
     try {
@@ -82,9 +76,7 @@ function wrapSingleAutoGenTool(toolDef: any, state: MovenRunState, reporter: Mov
       state.recordToolResult(log, res, Date.now() - start);
 
       const postCheck = MovenHeuristicsEngine.evaluate(state);
-      if (postCheck.tripped) {
-        await MovenKillHandler.executeKill(postCheck, state, reporter);
-      }
+      await MovenKillHandler.handleTripResult(postCheck, state, reporter);
 
       return res;
     } catch (err: any) {

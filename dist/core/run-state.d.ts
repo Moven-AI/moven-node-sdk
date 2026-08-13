@@ -68,6 +68,8 @@ export declare class MovenRunState {
     cleanTurnsCount: number;
     options: MovenOptions;
     constructor(options?: MovenOptions);
+    getModel(): string;
+    getActiveModel(): string;
     switchToCheaperModel(): string;
     registerCleanTurn(): boolean;
     updateOptions(newRules: Partial<MovenOptions>): void;

@@ -52,9 +52,19 @@ export const DEFAULT_CHEAPER_MODEL_MAP: Record<string, string> = {
   groq: 'llama-3.1-8b-instant',
   mistral: 'mistral-small-latest',
   cohere: 'command-r',
+  ollama: 'llama3:8b',
+  bedrock: 'anthropic.claude-3-haiku-20240307-v1:0',
+  'aws-bedrock': 'anthropic.claude-3-haiku-20240307-v1:0',
+  azure: 'gpt-4o-mini',
+  'azure-openai': 'gpt-4o-mini',
   openrouter: 'openai/gpt-4o-mini',
   'meta-llama': 'meta-llama/llama-3.1-8b-instruct',
   mistralai: 'mistralai/mistral-small-24b-instruct-2501',
+  deepinfra: 'meta-llama/llama-3.1-8b-instruct',
+  together: 'meta-llama/Llama-3-8b-chat-hf',
+  fireworks: 'accounts/fireworks/models/llama-v3p1-8b-instruct',
+  cerebras: 'llama3.1-8b',
+  sambanova: 'Meta-Llama-3.1-8B-Instruct',
   // Model specific overrides
   'gpt-4o': 'gpt-4o-mini',
   'gpt-4-turbo': 'gpt-4o-mini',
@@ -104,6 +114,14 @@ export class MovenRunState {
     this.tags = this.options.tags || ['production'];
     this.startTime = Date.now();
     this.activeModel = this.options.currentModel || 'openai/gpt-4o-mini';
+  }
+
+  public getModel(): string {
+    return this.activeModel;
+  }
+
+  public getActiveModel(): string {
+    return this.activeModel;
   }
 
   public switchToCheaperModel(): string {

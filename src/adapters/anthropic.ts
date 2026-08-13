@@ -17,9 +17,7 @@ export function wrapAnthropicToolUse<T extends (...args: any[]) => Promise<any>>
     const log = state.recordToolCall(toolName, args[0]);
 
     const check = MovenHeuristicsEngine.evaluate(state);
-    if (check.tripped) {
-      await MovenKillHandler.executeKill(check, state, reporter);
-    }
+    await MovenKillHandler.handleTripResult(check, state, reporter);
 
     const start = Date.now();
     try {
@@ -27,9 +25,7 @@ export function wrapAnthropicToolUse<T extends (...args: any[]) => Promise<any>>
       state.recordToolResult(log, res, Date.now() - start);
 
       const postCheck = MovenHeuristicsEngine.evaluate(state);
-      if (postCheck.tripped) {
-        await MovenKillHandler.executeKill(postCheck, state, reporter);
-      }
+      await MovenKillHandler.handleTripResult(postCheck, state, reporter);
 
       return res;
     } catch (err) {

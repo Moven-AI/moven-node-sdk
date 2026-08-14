@@ -67,6 +67,24 @@ export interface MovenOptions {
   /** Historical 95th-percentile step baseline for adaptive threshold scaling */
   percentileStepBaseline?: number;
 
+  // ─── SRE TECHNICAL RELIABILITY & STRUCTURAL SCHEMA SAFEGUARDS ───
+  /** Maximum error failure rate percentage over sliding request window before circuit opens (default: 50%) */
+  maxErrorRatePct?: number;
+  /** Latency threshold in ms for marking a slow / degraded model call (default: 30,000ms = 30s) */
+  maxSlowCallLatencyMs?: number;
+  /** Maximum percentage of slow calls over sliding window before tripping (default: 40%) */
+  maxSlowCallRatePct?: number;
+  /** Maximum consecutive JSON structural / schema validation failures before trip (default: 3) */
+  maxSchemaValidationFailures?: number;
+  /** Maximum token burst limit per single LLM step outside tool wrappers (default: 8,192 tokens) */
+  maxTokensPerStep?: number;
+  /** Real-time structural JSON validation detector (default: true) */
+  enableStructuralValidation?: boolean;
+  /** Enable coordinated organization-wide backoff on upstream provider degradation (default: true) */
+  enableGlobalBackoff?: boolean;
+  /** Sliding window size in requests for calculating error and slow call rates (default: 20) */
+  slidingWindowRequests?: number;
+
   /** Tool names that should be gated by the async LLM Judge before execution (e.g. 'sendEmail', 'writeToDb') */
   highRiskTools?: string[];
   promptCostPerMillion?: number;
@@ -134,6 +152,15 @@ export class MovenRunState {
   /** Latest Progress Delta cosine similarity score (0–1). Updated on each evaluate(). */
   public lastSemanticSimilarity: number = 0;
 
+  /** SRE Telemetry: Sliding window of recent call statuses (true = success, false = error) */
+  public recentCallOutcomes: { timestamp: number; success: boolean; latencyMs: number; isSchemaFailure?: boolean }[] = [];
+  /** Consecutive structural schema validation failures counter */
+  public consecutiveSchemaFailures: number = 0;
+  /** Max tokens generated in a single step (burst tracking) */
+  public lastStepTokenCount: number = 0;
+  /** Global backoff epoch in ms */
+  public globalBackoffUntil: number = 0;
+
   constructor(options: MovenOptions = {}) {
     this.options = {
       maxRepeatCalls: 5,
@@ -144,6 +171,14 @@ export class MovenRunState {
       judgeModel: options.judgeModel || 'google/gemini-2.5-flash-lite',
       autoFallbackCheaperModel: options.autoFallbackCheaperModel ?? true,
       enableLlmJudgeArbitrator: options.enableLlmJudgeArbitrator ?? true,
+      maxErrorRatePct: options.maxErrorRatePct ?? 50.00,
+      maxSlowCallLatencyMs: options.maxSlowCallLatencyMs ?? 30000,
+      maxSlowCallRatePct: options.maxSlowCallRatePct ?? 40.00,
+      maxSchemaValidationFailures: options.maxSchemaValidationFailures ?? 3,
+      maxTokensPerStep: options.maxTokensPerStep ?? 8192,
+      enableStructuralValidation: options.enableStructuralValidation ?? true,
+      enableGlobalBackoff: options.enableGlobalBackoff ?? true,
+      slidingWindowRequests: options.slidingWindowRequests ?? 20,
       agentName: 'agent-run',
       ...options,
     };
@@ -324,6 +359,11 @@ export class MovenRunState {
       const resultHash = this.hashResultState(res);
       log.resultHash = resultHash;
 
+      // SRE Outcome Tracking
+      const latency = log.durationMs;
+      const isError = res instanceof Error || (res && typeof res === 'object' && ('error' in res || res.status === 'error' || res.status === 'failed'));
+      this.recordCallOutcome(!isError, latency, false);
+
       // Check if previous identical tool call had a different result (progressive external state)
       const prevIdentical = this.toolCalls
         .slice(0, -1)
@@ -348,6 +388,43 @@ export class MovenRunState {
       this.intentHashes.push(intentHash);
       if (this.intentHashes.length > MAX_WINDOW) this.intentHashes.shift();
     }
+  }
+
+  public recordCallOutcome(success: boolean, latencyMs: number = 0, isSchemaFailure: boolean = false): void {
+    const MAX_WINDOW = this.options.slidingWindowRequests || 20;
+    this.recentCallOutcomes.push({ timestamp: Date.now(), success, latencyMs, isSchemaFailure });
+    if (this.recentCallOutcomes.length > MAX_WINDOW) this.recentCallOutcomes.shift();
+
+    if (isSchemaFailure) {
+      this.consecutiveSchemaFailures += 1;
+    } else if (success) {
+      this.consecutiveSchemaFailures = 0;
+    }
+  }
+
+  public recordSchemaValidationFailure(toolName?: string, errorMsg?: string): void {
+    this.recordCallOutcome(false, 0, true);
+  }
+
+  public recordStepTokens(tokens: number): void {
+    this.lastStepTokenCount = tokens;
+  }
+
+  public getRecentErrorRate(): number {
+    if (this.recentCallOutcomes.length === 0) return 0;
+    const errors = this.recentCallOutcomes.filter(o => !o.success).length;
+    return (errors / this.recentCallOutcomes.length) * 100;
+  }
+
+  public getRecentSlowCallRate(thresholdMs?: number): number {
+    const thresh = thresholdMs || this.options.maxSlowCallLatencyMs || 30000;
+    if (this.recentCallOutcomes.length === 0) return 0;
+    const slow = this.recentCallOutcomes.filter(o => o.latencyMs > thresh).length;
+    return (slow / this.recentCallOutcomes.length) * 100;
+  }
+
+  public setGlobalBackoff(durationMs: number): void {
+    this.globalBackoffUntil = Date.now() + durationMs;
   }
 
   /**

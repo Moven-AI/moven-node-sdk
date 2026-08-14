@@ -12,6 +12,11 @@ export type MovenHeuristicType =
   | 'depth_ceiling'
   | 'no_progress_loop'
   | 'semantic_loop'          // Semantic Fingerprint Layer: caught via cosine similarity / entropy
+  | 'high_error_rate'        // SRE Breaker: failure rate breached over sliding window
+  | 'latency_hang'           // SRE Breaker: slow call rate / inference timeout breached
+  | 'schema_validation_failure' // Structural JSON / output schema validation consecutive failures
+  | 'token_burst_limit'      // Generation burst limit per step outside tool wrappers
+  | 'global_provider_backoff' // Coordinated organization-wide provider degradation backoff
   | 'llm_judge_arbitrator'
   | 'ai_hallucination'
   | 'custom_rule';

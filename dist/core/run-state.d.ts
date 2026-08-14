@@ -61,6 +61,22 @@ export interface MovenOptions {
     pauseOnTrip?: boolean;
     /** Historical 95th-percentile step baseline for adaptive threshold scaling */
     percentileStepBaseline?: number;
+    /** Maximum error failure rate percentage over sliding request window before circuit opens (default: 50%) */
+    maxErrorRatePct?: number;
+    /** Latency threshold in ms for marking a slow / degraded model call (default: 30,000ms = 30s) */
+    maxSlowCallLatencyMs?: number;
+    /** Maximum percentage of slow calls over sliding window before tripping (default: 40%) */
+    maxSlowCallRatePct?: number;
+    /** Maximum consecutive JSON structural / schema validation failures before trip (default: 3) */
+    maxSchemaValidationFailures?: number;
+    /** Maximum token burst limit per single LLM step outside tool wrappers (default: 8,192 tokens) */
+    maxTokensPerStep?: number;
+    /** Real-time structural JSON validation detector (default: true) */
+    enableStructuralValidation?: boolean;
+    /** Enable coordinated organization-wide backoff on upstream provider degradation (default: true) */
+    enableGlobalBackoff?: boolean;
+    /** Sliding window size in requests for calculating error and slow call rates (default: 20) */
+    slidingWindowRequests?: number;
     /** Tool names that should be gated by the async LLM Judge before execution (e.g. 'sendEmail', 'writeToDb') */
     highRiskTools?: string[];
     promptCostPerMillion?: number;
@@ -110,6 +126,19 @@ export declare class MovenRunState {
     intentHashes: string[];
     /** Latest Progress Delta cosine similarity score (0–1). Updated on each evaluate(). */
     lastSemanticSimilarity: number;
+    /** SRE Telemetry: Sliding window of recent call statuses (true = success, false = error) */
+    recentCallOutcomes: {
+        timestamp: number;
+        success: boolean;
+        latencyMs: number;
+        isSchemaFailure?: boolean;
+    }[];
+    /** Consecutive structural schema validation failures counter */
+    consecutiveSchemaFailures: number;
+    /** Max tokens generated in a single step (burst tracking) */
+    lastStepTokenCount: number;
+    /** Global backoff epoch in ms */
+    globalBackoffUntil: number;
     constructor(options?: MovenOptions);
     getModel(): string;
     getActiveModel(): string;
@@ -122,6 +151,12 @@ export declare class MovenRunState {
     isReadOnlyTool(toolName: string): boolean;
     recordToolCall(toolName: string, args: any): ToolCallLog;
     recordToolResult(logOrResult: ToolCallLog | any, result?: any, durationMs?: number): void;
+    recordCallOutcome(success: boolean, latencyMs?: number, isSchemaFailure?: boolean): void;
+    recordSchemaValidationFailure(toolName?: string, errorMsg?: string): void;
+    recordStepTokens(tokens: number): void;
+    getRecentErrorRate(): number;
+    getRecentSlowCallRate(thresholdMs?: number): number;
+    setGlobalBackoff(durationMs: number): void;
     /**
      * Record the agent's reasoning/thought text for the current step.
      * Call this after receiving the LLM response, before calling recordToolCall.

@@ -133,7 +133,64 @@ class MovenHeuristicsEngine {
                 };
             }
         }
-        // 6. Custom Developer Rule Check
+        // 6. Global Provider Health & Coordinated Backoff Check
+        if (opts.enableGlobalBackoff !== false && state.globalBackoffUntil > Date.now()) {
+            const remainingSec = Math.round((state.globalBackoffUntil - Date.now()) / 1000);
+            return {
+                tripped: true,
+                heuristic: 'global_provider_backoff',
+                reason: `Global provider degradation backoff active (${remainingSec}s remaining). Halting agent execution to prevent key exhaustion / DDoS.`,
+                metrics: state.getMetrics(),
+            };
+        }
+        // 7. Structural Schema Validation Failure Check (Catches malformed JSON / corrupted output)
+        if (opts.enableStructuralValidation !== false && state.consecutiveSchemaFailures >= (opts.maxSchemaValidationFailures || 3)) {
+            const lastCall = state.toolCalls[state.toolCalls.length - 1];
+            return {
+                tripped: true,
+                heuristic: 'schema_validation_failure',
+                reason: `Output schema validation failed ${state.consecutiveSchemaFailures} consecutive times. Opened circuit breaker to prevent agent from processing corrupted data.`,
+                toolName: lastCall?.toolName,
+                toolArgs: lastCall?.args,
+                metrics: state.getMetrics(),
+            };
+        }
+        // 8. SRE Technical Error Rate Threshold Check
+        if (state.recentCallOutcomes.length >= 5) {
+            const errorRate = state.getRecentErrorRate();
+            const maxErr = opts.maxErrorRatePct ?? 50.0;
+            if (errorRate >= maxErr) {
+                return {
+                    tripped: true,
+                    heuristic: 'high_error_rate',
+                    reason: `Call error rate (${errorRate.toFixed(1)}%) breached SRE failure threshold (${maxErr}% over last ${state.recentCallOutcomes.length} requests).`,
+                    metrics: state.getMetrics(),
+                };
+            }
+        }
+        // 9. Latency Hang & Slow Call Rate Check
+        if (state.recentCallOutcomes.length >= 5) {
+            const slowRate = state.getRecentSlowCallRate(opts.maxSlowCallLatencyMs);
+            const maxSlow = opts.maxSlowCallRatePct ?? 40.0;
+            if (slowRate >= maxSlow) {
+                return {
+                    tripped: true,
+                    heuristic: 'latency_hang',
+                    reason: `Slow call rate (${slowRate.toFixed(1)}%) breached threshold (${maxSlow}% exceeding ${(opts.maxSlowCallLatencyMs || 30000) / 1000}s latency).`,
+                    metrics: state.getMetrics(),
+                };
+            }
+        }
+        // 10. Single-Step Token Generation Burst Ceiling (Catches runaway generation outside tool calls)
+        if (state.lastStepTokenCount > (opts.maxTokensPerStep || 8192)) {
+            return {
+                tripped: true,
+                heuristic: 'token_burst_limit',
+                reason: `Single-step generation burst (${state.lastStepTokenCount} tokens) exceeded maximum token ceiling (${opts.maxTokensPerStep || 8192} tokens).`,
+                metrics: state.getMetrics(),
+            };
+        }
+        // 11. Custom Developer Rule Check
         if (opts.customCheck) {
             const customRes = opts.customCheck(state);
             if (customRes && customRes.tripped) {

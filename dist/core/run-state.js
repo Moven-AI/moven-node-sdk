@@ -59,6 +59,14 @@ class MovenRunState {
     intentHashes = [];
     /** Latest Progress Delta cosine similarity score (0–1). Updated on each evaluate(). */
     lastSemanticSimilarity = 0;
+    /** SRE Telemetry: Sliding window of recent call statuses (true = success, false = error) */
+    recentCallOutcomes = [];
+    /** Consecutive structural schema validation failures counter */
+    consecutiveSchemaFailures = 0;
+    /** Max tokens generated in a single step (burst tracking) */
+    lastStepTokenCount = 0;
+    /** Global backoff epoch in ms */
+    globalBackoffUntil = 0;
     constructor(options = {}) {
         this.options = {
             maxRepeatCalls: 5,
@@ -69,6 +77,14 @@ class MovenRunState {
             judgeModel: options.judgeModel || 'google/gemini-2.5-flash-lite',
             autoFallbackCheaperModel: options.autoFallbackCheaperModel ?? true,
             enableLlmJudgeArbitrator: options.enableLlmJudgeArbitrator ?? true,
+            maxErrorRatePct: options.maxErrorRatePct ?? 50.00,
+            maxSlowCallLatencyMs: options.maxSlowCallLatencyMs ?? 30000,
+            maxSlowCallRatePct: options.maxSlowCallRatePct ?? 40.00,
+            maxSchemaValidationFailures: options.maxSchemaValidationFailures ?? 3,
+            maxTokensPerStep: options.maxTokensPerStep ?? 8192,
+            enableStructuralValidation: options.enableStructuralValidation ?? true,
+            enableGlobalBackoff: options.enableGlobalBackoff ?? true,
+            slidingWindowRequests: options.slidingWindowRequests ?? 20,
             agentName: 'agent-run',
             ...options,
         };
@@ -224,6 +240,10 @@ class MovenRunState {
             // Compute and attach Result-Delta Hash (status / payload progression)
             const resultHash = this.hashResultState(res);
             log.resultHash = resultHash;
+            // SRE Outcome Tracking
+            const latency = log.durationMs;
+            const isError = res instanceof Error || (res && typeof res === 'object' && ('error' in res || res.status === 'error' || res.status === 'failed'));
+            this.recordCallOutcome(!isError, latency, false);
             // Check if previous identical tool call had a different result (progressive external state)
             const prevIdentical = this.toolCalls
                 .slice(0, -1)
@@ -245,6 +265,40 @@ class MovenRunState {
             if (this.intentHashes.length > MAX_WINDOW)
                 this.intentHashes.shift();
         }
+    }
+    recordCallOutcome(success, latencyMs = 0, isSchemaFailure = false) {
+        const MAX_WINDOW = this.options.slidingWindowRequests || 20;
+        this.recentCallOutcomes.push({ timestamp: Date.now(), success, latencyMs, isSchemaFailure });
+        if (this.recentCallOutcomes.length > MAX_WINDOW)
+            this.recentCallOutcomes.shift();
+        if (isSchemaFailure) {
+            this.consecutiveSchemaFailures += 1;
+        }
+        else if (success) {
+            this.consecutiveSchemaFailures = 0;
+        }
+    }
+    recordSchemaValidationFailure(toolName, errorMsg) {
+        this.recordCallOutcome(false, 0, true);
+    }
+    recordStepTokens(tokens) {
+        this.lastStepTokenCount = tokens;
+    }
+    getRecentErrorRate() {
+        if (this.recentCallOutcomes.length === 0)
+            return 0;
+        const errors = this.recentCallOutcomes.filter(o => !o.success).length;
+        return (errors / this.recentCallOutcomes.length) * 100;
+    }
+    getRecentSlowCallRate(thresholdMs) {
+        const thresh = thresholdMs || this.options.maxSlowCallLatencyMs || 30000;
+        if (this.recentCallOutcomes.length === 0)
+            return 0;
+        const slow = this.recentCallOutcomes.filter(o => o.latencyMs > thresh).length;
+        return (slow / this.recentCallOutcomes.length) * 100;
+    }
+    setGlobalBackoff(durationMs) {
+        this.globalBackoffUntil = Date.now() + durationMs;
     }
     /**
      * Record the agent's reasoning/thought text for the current step.

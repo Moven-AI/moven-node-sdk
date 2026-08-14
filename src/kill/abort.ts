@@ -5,16 +5,78 @@ import { MovenReporter } from '../reporter';
 
 export class MovenKillHandler {
   /**
-   * Handles a heuristic trip result by either activating auto-fallback or throwing a MovenKillError.
+   * Handles a heuristic trip result by checking dry-run mode, soft pause, auto-fallback, or throwing MovenKillError.
    */
   public static async handleTripResult(
     tripResult: HeuristicTripResult,
     state: MovenRunState,
     reporter?: MovenReporter
-  ): Promise<{ fallbackActivated: boolean }> {
+  ): Promise<{ fallbackActivated: boolean; dryRunTrip?: boolean; paused?: boolean }> {
     if (!tripResult.tripped) return { fallbackActivated: false };
 
-    // Auto-fallback: switch to cheaper model on first trip instead of killing
+    // 1. Dry Run Simulation Mode Check
+    if (state.options.dryRun) {
+      console.warn(
+        `\x1b[33m\x1b[1m🔍 [Moven AI - DRY RUN MODE]\x1b[0m \x1b[36mCircuit breaker simulated trip for heuristic '${tripResult.heuristic || 'repeat_tool_call'}': ${tripResult.reason}. Execution continues without interruption.\x1b[0m`
+      );
+
+      if (reporter) {
+        reporter.sendPayload({
+          event: 'dry_run_trip',
+          runId: state.runId,
+          agentId: state.agentId,
+          agentName: state.agentName,
+          heuristic: tripResult.heuristic,
+          reason: tripResult.reason,
+          toolName: tripResult.toolName,
+          toolArgs: tripResult.toolArgs,
+          metrics: tripResult.metrics || state.getMetrics(),
+          timestamp: new Date().toISOString(),
+        }).catch(() => {});
+      }
+
+      return { fallbackActivated: false, dryRunTrip: true };
+    }
+
+    // 2. Human-in-the-Loop Soft Trip / Pause & Ask Check
+    if (state.options.pauseOnTrip) {
+      const resumeToken = `resume_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      console.warn(
+        `\x1b[33m\x1b[1m⏸️ [Moven AI - PAUSE & ASK]\x1b[0m \x1b[36mAgent '${state.agentName}' paused on suspicious activity for developer verification. Webhook dispatched. [Token: ${resumeToken}]\x1b[0m`
+      );
+
+      if (reporter) {
+        reporter.sendPayload({
+          event: 'pause',
+          runId: state.runId,
+          agentId: state.agentId,
+          agentName: state.agentName,
+          heuristic: tripResult.heuristic,
+          reason: tripResult.reason,
+          toolName: tripResult.toolName,
+          toolArgs: tripResult.toolArgs,
+          resumeToken,
+          metrics: tripResult.metrics || state.getMetrics(),
+          timestamp: new Date().toISOString(),
+        }).catch(() => {});
+      }
+
+      if (state.options.onPause) {
+        try {
+          state.options.onPause({
+            agentName: state.agentName,
+            reason: tripResult.reason || 'Paused on suspicious loop',
+            toolName: tripResult.toolName,
+            args: tripResult.toolArgs,
+            resumeToken,
+          });
+        } catch {}
+      }
+
+      return { fallbackActivated: false, paused: true };
+    }
+
+    // 3. Auto-fallback: switch to cheaper model on first trip instead of killing
     if (state.options.autoFallbackCheaperModel && !state.isFallbackActive) {
       const cheaperModel = state.switchToCheaperModel();
       console.warn(
@@ -50,7 +112,6 @@ export class MovenKillHandler {
       state.depth = Math.max(0, state.depth - 2);
       return { fallbackActivated: true };
     }
-
 
     // Already in fallback mode or auto-fallback disabled — execute kill
     await this.executeKill(tripResult, state, reporter);

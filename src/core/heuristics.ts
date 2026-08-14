@@ -70,14 +70,21 @@ export class MovenHeuristicsEngine {
       }
     }
 
-    // 1. Repeat Call Detection
+    // 1. Repeat Call Detection (with Read vs Write tool separation & Idempotency Key validation)
     const repeatCount = state.getRecentRepeatCallsCount(opts.repeatTimeWindowMs);
-    if (repeatCount >= (opts.maxRepeatCalls || 5)) {
-      const lastCall = state.toolCalls[state.toolCalls.length - 1];
+    const lastCall = state.toolCalls[state.toolCalls.length - 1];
+    const isReadOnly = lastCall?.isReadOnly || false;
+    
+    // Read-only tools (search, get, fetch) receive 2.5x higher headroom than Write tools
+    const baseRepeatLimit = opts.maxRepeatCalls || 5;
+    const effectiveRepeatLimit = isReadOnly ? Math.round(baseRepeatLimit * 2.5) : baseRepeatLimit;
+
+    if (repeatCount >= effectiveRepeatLimit) {
+      const toolType = isReadOnly ? 'Read tool' : 'Write tool';
       return {
         tripped: true,
         heuristic: 'repeat_tool_call',
-        reason: `Tool '${lastCall?.toolName}' called ${repeatCount} times in last ${opts.repeatTimeWindowMs! / 1000}s with near-identical parameters.`,
+        reason: `${toolType} '${lastCall?.toolName}' called ${repeatCount} times in last ${opts.repeatTimeWindowMs! / 1000}s without result progression (limit: ${effectiveRepeatLimit}).`,
         toolName: lastCall?.toolName,
         toolArgs: lastCall?.args,
         metrics: state.getMetrics(),
@@ -103,12 +110,16 @@ export class MovenHeuristicsEngine {
       }
     }
 
-    // 3. Depth Ceiling
-    if (state.depth > (opts.maxDepth || 15)) {
+    // 3. Depth Ceiling (with Adaptive 95th-Percentile Baseline)
+    const maxDepth = opts.percentileStepBaseline && opts.percentileStepBaseline > (opts.maxDepth || 15)
+      ? Math.round(opts.percentileStepBaseline * 1.25)
+      : (opts.maxDepth || 15);
+
+    if (state.depth > maxDepth) {
       return {
         tripped: true,
         heuristic: 'depth_ceiling',
-        reason: `Agent call depth (${state.depth}) exceeded maximum allowed recursion limit (${opts.maxDepth}).`,
+        reason: `Agent call depth (${state.depth}) exceeded maximum allowed recursion limit (${maxDepth}${opts.percentileStepBaseline ? ' [adaptive 95th-percentile baseline]' : ''}).`,
         metrics: state.getMetrics(),
       };
     }

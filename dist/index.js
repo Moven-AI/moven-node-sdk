@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
+exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
 var run_state_1 = require("./core/run-state");
 Object.defineProperty(exports, "MovenRunState", { enumerable: true, get: function () { return run_state_1.MovenRunState; } });
 Object.defineProperty(exports, "DEFAULT_CHEAPER_MODEL_MAP", { enumerable: true, get: function () { return run_state_1.DEFAULT_CHEAPER_MODEL_MAP; } });
@@ -10,6 +10,8 @@ var burn_guard_1 = require("./core/burn-guard");
 Object.defineProperty(exports, "MovenOvernightBurnGuard", { enumerable: true, get: function () { return burn_guard_1.MovenOvernightBurnGuard; } });
 var semantic_cache_1 = require("./core/semantic-cache");
 Object.defineProperty(exports, "MovenSemanticCacheEngine", { enumerable: true, get: function () { return semantic_cache_1.MovenSemanticCacheEngine; } });
+var semantic_fingerprint_1 = require("./core/semantic-fingerprint");
+Object.defineProperty(exports, "SemanticFingerprintEngine", { enumerable: true, get: function () { return semantic_fingerprint_1.SemanticFingerprintEngine; } });
 var heuristics_1 = require("./core/heuristics");
 Object.defineProperty(exports, "MovenHeuristicsEngine", { enumerable: true, get: function () { return heuristics_1.MovenHeuristicsEngine; } });
 var hallucination_1 = require("./core/hallucination");

@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenRunState = exports.DEFAULT_CHEAPER_MODEL_MAP = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 const checkpoint_1 = require("./checkpoint");
+const semantic_fingerprint_1 = require("./semantic-fingerprint");
 exports.DEFAULT_CHEAPER_MODEL_MAP = {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-3-haiku-20240307',
@@ -52,6 +53,12 @@ class MovenRunState {
     isFallbackActive = false;
     cleanTurnsCount = 0;
     options;
+    /** Sliding window of the last N agent reasoning/thought strings */
+    reasoningSteps = [];
+    /** Parallel array of goal-state hashes computed after each tool result */
+    intentHashes = [];
+    /** Latest Progress Delta cosine similarity score (0–1). Updated on each evaluate(). */
+    lastSemanticSimilarity = 0;
     constructor(options = {}) {
         this.options = {
             maxRepeatCalls: 5,
@@ -167,13 +174,32 @@ class MovenRunState {
         return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
     }
     checkpointManager = new checkpoint_1.MovenCheckpointManager();
+    isSafeToRetryTool(toolName) {
+        const list = this.options.safeToRetryTools || [
+            'check_build_status', 'poll_task', 'get_job_status', 'wait_for_lock',
+            'check_status', 'poll_status', 'get_task_status', 'wait_for_job', 'poll'
+        ];
+        return list.some(item => toolName.toLowerCase().includes(item.toLowerCase()));
+    }
+    isReadOnlyTool(toolName) {
+        const defaultReadOnlyPrefixes = ['get_', 'fetch_', 'read_', 'list_', 'search_', 'query_', 'check_', 'describe_', 'inspect_', 'poll_'];
+        const customList = this.options.readOnlyTools || [];
+        const lower = toolName.toLowerCase();
+        return customList.includes(toolName) || defaultReadOnlyPrefixes.some(prefix => lower.startsWith(prefix));
+    }
     recordToolCall(toolName, args) {
         const argsHash = this.hashArguments(toolName, args);
+        const idempotencyKey = args?.idempotency_key || args?.idempotencyKey || args?.idempotency_token || args?.client_request_token;
+        const isPollingTool = this.isSafeToRetryTool(toolName);
+        const isReadOnly = this.isReadOnlyTool(toolName);
         const log = {
             toolName,
             args,
             argsHash,
             timestamp: Date.now(),
+            idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+            isPollingTool,
+            isReadOnly,
         };
         this.toolCalls.push(log);
         this.depth += 1;
@@ -195,10 +221,56 @@ class MovenRunState {
         if (log) {
             log.result = res;
             log.durationMs = durationMs || (Date.now() - log.timestamp);
+            // Compute and attach Result-Delta Hash (status / payload progression)
+            const resultHash = this.hashResultState(res);
+            log.resultHash = resultHash;
+            // Check if previous identical tool call had a different result (progressive external state)
+            const prevIdentical = this.toolCalls
+                .slice(0, -1)
+                .reverse()
+                .find(c => c.toolName === log.toolName && c.argsHash === log.argsHash);
+            if (prevIdentical && prevIdentical.resultHash && prevIdentical.resultHash !== resultHash) {
+                log.isResultProgressive = true;
+            }
             // Hash turn state for no-progress heuristic
             const turnHash = this.hashStateTurn(log.toolName, res);
             this.stateHashes.push(turnHash);
+            // Compute and store the goal-state hash (intent + result) for Semantic Fingerprint
+            const intentText = log.reasoning || log.toolName;
+            const intentHash = semantic_fingerprint_1.SemanticFingerprintEngine.computeIntentHash(intentText, res);
+            log.intentHash = intentHash;
+            // Maintain the sliding window (max 10 entries)
+            const MAX_WINDOW = 10;
+            this.intentHashes.push(intentHash);
+            if (this.intentHashes.length > MAX_WINDOW)
+                this.intentHashes.shift();
         }
+    }
+    /**
+     * Record the agent's reasoning/thought text for the current step.
+     * Call this after receiving the LLM response, before calling recordToolCall.
+     * Compatible with: Claude <thinking>, OpenAI o-series reasoning, LangChain thought fields.
+     */
+    recordReasoning(step) {
+        if (!step || step.trim().length === 0)
+            return;
+        const MAX_WINDOW = 10;
+        this.reasoningSteps.push(step.trim());
+        if (this.reasoningSteps.length > MAX_WINDOW)
+            this.reasoningSteps.shift();
+        // Tag the most recent tool call with this reasoning text (if available)
+        if (this.toolCalls.length > 0) {
+            const last = this.toolCalls[this.toolCalls.length - 1];
+            if (!last.reasoning)
+                last.reasoning = step.trim();
+        }
+    }
+    /**
+     * Returns true if the given tool name is declared as high-risk by the user,
+     * meaning the async LLM Judge must confirm progress before it executes.
+     */
+    isHighRiskTool(toolName) {
+        return (this.options.highRiskTools ?? []).includes(toolName);
     }
     addCost(cost) {
         this.cumulativeCost += cost;
@@ -212,13 +284,56 @@ class MovenRunState {
             durationMs: Date.now() - this.startTime,
         };
     }
+    /**
+     * Calculates recent repeat calls with Result-Delta Hashing and Polling Whitelisting.
+     * - If output state is progressing (status changes from pending -> building -> done), repeat count resets.
+     * - If tool is safe-to-retry / polling, it is allowed up to pollingTtlSeconds (default 600s).
+     * - If tool is read-only, threshold receives relaxed headroom.
+     */
     getRecentRepeatCallsCount(timeWindowMs) {
         const window = timeWindowMs || this.options.repeatTimeWindowMs || 60000;
         if (this.toolCalls.length === 0)
             return 0;
         const lastCall = this.toolCalls[this.toolCalls.length - 1];
         const now = Date.now();
-        return this.toolCalls.filter(call => call.argsHash === lastCall.argsHash && (now - call.timestamp) <= window).length;
+        // 1. Check Safe-to-Retry / Long-Running Polling Tools
+        if (lastCall.isPollingTool) {
+            const pollingCalls = this.toolCalls.filter(c => c.toolName === lastCall.toolName && c.argsHash === lastCall.argsHash);
+            if (pollingCalls.length > 1) {
+                const firstPollTime = pollingCalls[0].timestamp;
+                const totalPollDurationSec = (now - firstPollTime) / 1000;
+                const ttlSec = this.options.pollingTtlSeconds || 600; // 10 minutes default
+                if (totalPollDurationSec > ttlSec) {
+                    // Polling TTL exceeded — trip breaker
+                    return this.options.maxRepeatCalls ? this.options.maxRepeatCalls + 1 : 10;
+                }
+                // If results are actively changing or within TTL, do NOT treat as stagnant loop!
+                const hasProgressiveResults = pollingCalls.some(c => c.isResultProgressive);
+                if (hasProgressiveResults || totalPollDurationSec <= ttlSec) {
+                    return 1; // Valid non-stagnant polling
+                }
+            }
+        }
+        // 2. Result-Delta Hashing: Distinguish stagnant loop from evolving result state
+        const enableResultDelta = this.options.enableResultDeltaProgression !== false;
+        const identicalArgsCalls = this.toolCalls.filter(call => call.argsHash === lastCall.argsHash && (now - call.timestamp) <= window);
+        if (enableResultDelta && identicalArgsCalls.length > 1) {
+            // Find the last consecutive run of stagnant results (where both argsHash AND resultHash are identical)
+            const currentResultHash = lastCall.resultHash;
+            let stagnantCount = 0;
+            for (let i = identicalArgsCalls.length - 1; i >= 0; i--) {
+                const call = identicalArgsCalls[i];
+                if (call.resultHash === currentResultHash) {
+                    stagnantCount++;
+                }
+                else {
+                    // Result differed in previous turn! External state changed. Break consecutive stagnant chain.
+                    break;
+                }
+            }
+            return stagnantCount;
+        }
+        return identicalArgsCalls.length;
     }
     canonicalStringify(obj) {
         if (obj === null || typeof obj !== 'object') {
@@ -238,6 +353,29 @@ class MovenRunState {
         }
         catch {
             return `${toolName}_${Date.now()}`;
+        }
+    }
+    hashResultState(result) {
+        try {
+            if (result === undefined || result === null)
+                return 'null_result';
+            // Extract status field if object contains it
+            let statePayload = result;
+            if (typeof result === 'object' && !Array.isArray(result)) {
+                if ('status' in result || 'state' in result || 'progress' in result || 'data' in result || 'id' in result) {
+                    statePayload = {
+                        status: result.status ?? result.state ?? result.progress,
+                        id: result.id,
+                        keys: Object.keys(result).sort(),
+                        length: Array.isArray(result.data) ? result.data.length : undefined,
+                    };
+                }
+            }
+            const canonical = this.canonicalStringify(statePayload);
+            return crypto_1.default.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
+        }
+        catch {
+            return `res_${Date.now()}`;
         }
     }
     hashStateTurn(toolName, result) {

@@ -6,6 +6,8 @@ export { MovenOvernightBurnGuard } from './core/burn-guard';
 export type { BurnGuardOptions, BurnGuardCheckResult } from './core/burn-guard';
 export { MovenSemanticCacheEngine } from './core/semantic-cache';
 export type { SemanticCacheOptions, CacheHitResult } from './core/semantic-cache';
+export { SemanticFingerprintEngine } from './core/semantic-fingerprint';
+export type { SemanticFingerprintOptions, SemanticFingerprintResult } from './core/semantic-fingerprint';
 export { MovenHeuristicsEngine } from './core/heuristics';
 export type { HeuristicTripResult } from './core/heuristics';
 export { MovenHallucinationDetector } from './core/hallucination';

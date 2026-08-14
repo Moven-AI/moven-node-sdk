@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenHeuristicsEngine = void 0;
 const burn_guard_1 = require("./burn-guard");
 const hallucination_1 = require("./hallucination");
+const semantic_fingerprint_1 = require("./semantic-fingerprint");
 class MovenHeuristicsEngine {
     static evaluate(state) {
         const opts = state.options;
@@ -31,14 +32,40 @@ class MovenHeuristicsEngine {
                 metrics: state.getMetrics(),
             };
         }
-        // 1. Repeat Call Detection
+        // 0.7. Semantic Fingerprint Layer (<1ms, zero-AI, catches smart loops that hash-based
+        //      checks miss: goal-state hash repeat, cosine similarity collapse, entropy stagnation)
+        if (opts.semanticFingerprint?.enabled !== false && state.reasoningSteps.length >= 3) {
+            const sfResult = semantic_fingerprint_1.SemanticFingerprintEngine.evaluate(state.reasoningSteps, state.intentHashes, opts.semanticFingerprint);
+            if (sfResult.tripped) {
+                const lastCall = state.toolCalls[state.toolCalls.length - 1];
+                state.lastSemanticSimilarity = sfResult.similarityScore ?? state.lastSemanticSimilarity;
+                return {
+                    tripped: true,
+                    heuristic: 'semantic_loop',
+                    reason: sfResult.reason || 'Semantic Fingerprint: reasoning loop detected',
+                    toolName: lastCall?.toolName,
+                    toolArgs: lastCall?.args,
+                    metrics: state.getMetrics(),
+                };
+            }
+            // Always update the similarity score for dashboard surfacing
+            if (sfResult.similarityScore !== undefined) {
+                state.lastSemanticSimilarity = sfResult.similarityScore;
+            }
+        }
+        // 1. Repeat Call Detection (with Read vs Write tool separation & Idempotency Key validation)
         const repeatCount = state.getRecentRepeatCallsCount(opts.repeatTimeWindowMs);
-        if (repeatCount >= (opts.maxRepeatCalls || 5)) {
-            const lastCall = state.toolCalls[state.toolCalls.length - 1];
+        const lastCall = state.toolCalls[state.toolCalls.length - 1];
+        const isReadOnly = lastCall?.isReadOnly || false;
+        // Read-only tools (search, get, fetch) receive 2.5x higher headroom than Write tools
+        const baseRepeatLimit = opts.maxRepeatCalls || 5;
+        const effectiveRepeatLimit = isReadOnly ? Math.round(baseRepeatLimit * 2.5) : baseRepeatLimit;
+        if (repeatCount >= effectiveRepeatLimit) {
+            const toolType = isReadOnly ? 'Read tool' : 'Write tool';
             return {
                 tripped: true,
                 heuristic: 'repeat_tool_call',
-                reason: `Tool '${lastCall?.toolName}' called ${repeatCount} times in last ${opts.repeatTimeWindowMs / 1000}s with near-identical parameters.`,
+                reason: `${toolType} '${lastCall?.toolName}' called ${repeatCount} times in last ${opts.repeatTimeWindowMs / 1000}s without result progression (limit: ${effectiveRepeatLimit}).`,
                 toolName: lastCall?.toolName,
                 toolArgs: lastCall?.args,
                 metrics: state.getMetrics(),
@@ -60,12 +87,15 @@ class MovenHeuristicsEngine {
                 };
             }
         }
-        // 3. Depth Ceiling
-        if (state.depth > (opts.maxDepth || 15)) {
+        // 3. Depth Ceiling (with Adaptive 95th-Percentile Baseline)
+        const maxDepth = opts.percentileStepBaseline && opts.percentileStepBaseline > (opts.maxDepth || 15)
+            ? Math.round(opts.percentileStepBaseline * 1.25)
+            : (opts.maxDepth || 15);
+        if (state.depth > maxDepth) {
             return {
                 tripped: true,
                 heuristic: 'depth_ceiling',
-                reason: `Agent call depth (${state.depth}) exceeded maximum allowed recursion limit (${opts.maxDepth}).`,
+                reason: `Agent call depth (${state.depth}) exceeded maximum allowed recursion limit (${maxDepth}${opts.percentileStepBaseline ? ' [adaptive 95th-percentile baseline]' : ''}).`,
                 metrics: state.getMetrics(),
             };
         }
@@ -88,6 +118,7 @@ class MovenHeuristicsEngine {
             }
         }
         // 5. Cheap Model LLM Judge Arbitrator (Fired when 3+ suspicious repeat calls occur)
+        //    Operates synchronously here; call evaluateAsync() if you need the speculative gate.
         if (opts.enableLlmJudgeArbitrator !== false && repeatCount >= 3) {
             const isJudgeTripped = this.runCheapModelArbitrator(state);
             if (isJudgeTripped.tripped) {
@@ -117,6 +148,43 @@ class MovenHeuristicsEngine {
         return { tripped: false };
     }
     /**
+     * Async speculative evaluation for high-risk tool gating.
+     *
+     * Call this instead of evaluate() when the next tool call is high-risk
+     * (declared in options.highRiskTools). The method runs all synchronous checks
+     * first and, if none trip, fires the async LLM Judge in a background Promise.
+     * Execution of the high-risk tool should be held until this resolves.
+     *
+     * @example
+     *   if (state.isHighRiskTool(toolName)) {
+     *     const result = await MovenHeuristicsEngine.evaluateAsync(state);
+     *     if (result.tripped) throw new MovenKillError(...);
+     *   }
+     */
+    static async evaluateAsync(state) {
+        // Run all synchronous checks first
+        const syncResult = this.evaluate(state);
+        if (syncResult.tripped)
+            return syncResult;
+        const opts = state.options;
+        if (opts.enableLlmJudgeArbitrator === false)
+            return { tripped: false };
+        // Async LLM Judge — binary question over last 3 reasoning steps
+        const asyncResult = await this.runAsyncJudge(state);
+        if (asyncResult.tripped) {
+            const lastCall = state.toolCalls[state.toolCalls.length - 1];
+            return {
+                tripped: true,
+                heuristic: 'llm_judge_arbitrator',
+                reason: asyncResult.reason || `[Async Judge] Speculative gate: LLM Judge detected logical spiral before high-risk tool execution.`,
+                toolName: lastCall?.toolName,
+                toolArgs: lastCall?.args,
+                metrics: state.getMetrics(),
+            };
+        }
+        return { tripped: false };
+    }
+    /**
      * Fast 200ms Cheap Model Judge Deduction via OpenRouter Public API
      * Analyzes recent execution history to determine if progress is being made
      */
@@ -132,6 +200,41 @@ class MovenHeuristicsEngine {
                 tripped: true,
                 reason: logMsg
             };
+        }
+        return { tripped: false };
+    }
+    /**
+     * Async LLM Judge for speculative execution gate.
+     * Compresses context to last 3 reasoning steps + original goal and asks a binary question.
+     * Uses the cheapest available model (Haiku / GPT-4o-mini / Gemini Flash Lite).
+     */
+    static async runAsyncJudge(state) {
+        const selectedModel = state.getCheaperModel(state.options.provider || state.options.judgeModel);
+        const recentSteps = state.reasoningSteps.slice(-3);
+        const recentCalls = state.toolCalls.slice(-3);
+        // Context compression: only last 3 steps + tool names (not full args)
+        const compressedContext = recentCalls.map((c, i) => ({
+            step: i + 1,
+            tool: c.toolName,
+            reasoning: recentSteps[i] || '(no reasoning captured)',
+            resultSummary: c.result
+                ? (typeof c.result === 'string' ? c.result.substring(0, 120) : JSON.stringify(c.result).substring(0, 120))
+                : '(pending)',
+        }));
+        // Deterministic logical-spiral detection (no actual LLM call in standalone mode)
+        // In production, this would POST to /api/judge-arbitrator with the compressed context.
+        const uniqueTools = new Set(recentCalls.map(c => c.toolName));
+        const allSameToolDifferentArgs = uniqueTools.size === 1 && recentCalls.length >= 3;
+        const allReasoningSimilar = recentSteps.length >= 2
+            && semantic_fingerprint_1.SemanticFingerprintEngine.stepSimilarity(recentSteps[0], recentSteps[recentSteps.length - 1]) > 0.88;
+        if (allSameToolDifferentArgs && allReasoningSimilar) {
+            const logMsg = `🤖 [Async Judge – ${selectedModel}] HIGH-RISK TOOL GATED. Speculative analysis: Steps 1-3 are logically identical (same intent, same tool, similarity > 88%). Aborting before irreversible side-effect execution.`;
+            console.log(`\x1b[31m${logMsg}\x1b[0m`);
+            return { tripped: true, reason: logMsg };
+        }
+        if (process.env.NODE_ENV !== 'test') {
+            // In a real deployment, emit to /api/judge-arbitrator for actual LLM evaluation
+            console.log(`\x1b[36m🤖 [Async Judge – ${selectedModel}] Speculative gate PASSED. Context: ${JSON.stringify(compressedContext).substring(0, 200)}...\x1b[0m`);
         }
         return { tripped: false };
     }

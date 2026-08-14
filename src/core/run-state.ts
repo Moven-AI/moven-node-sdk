@@ -11,11 +11,19 @@ export interface ToolCallLog {
   argsHash: string;
   timestamp: number;
   result?: any;
+  resultHash?: string;
+  isResultProgressive?: boolean;
   durationMs?: number;
   /** Optional: the agent's raw reasoning/thought text that preceded this tool call */
   reasoning?: string;
   /** Goal-state hash of (reasoning intent + tool result) — set after recordToolResult */
   intentHash?: string;
+  /** Optional idempotency key passed with write tool */
+  idempotencyKey?: string;
+  /** True if tool is recognized as safe-to-retry / long-running poll */
+  isPollingTool?: boolean;
+  /** True if tool is read-only (e.g. get_, fetch_, search_) */
+  isReadOnly?: boolean;
 }
 
 export interface MovenOptions {
@@ -42,6 +50,23 @@ export interface MovenOptions {
   burnGuard?: BurnGuardOptions; // Overnight Burn Guard ($2000 loss prevention engine)
   semanticCache?: SemanticCacheOptions; // Semantic caching engine options
   semanticFingerprint?: SemanticFingerprintOptions; // Semantic Fingerprint loop detection layer
+
+  // ─── NEW POLICIES: POLLING, IDEMPOTENCY, DRY RUN & ADAPTIVE SAFEGUARDS ───
+  /** Enable Result-Delta Hashing to distinguish legitimate status polling from stagnant loops (default: true) */
+  enableResultDeltaProgression?: boolean;
+  /** List of tool names that are whitelisted as safe-to-retry long-running polls (bypasses repeat count, governed by pollingTtlSeconds) */
+  safeToRetryTools?: string[];
+  /** Maximum duration in seconds allowed for a polling loop before tripping (default: 600 = 10 minutes) */
+  pollingTtlSeconds?: number;
+  /** List of read-only tool names/prefixes that receive relaxed repeat limits */
+  readOnlyTools?: string[];
+  /** Dry Run simulation mode: Evaluates and reports all circuit trips without terminating execution (default: false) */
+  dryRun?: boolean;
+  /** Soft Trip / Pause & Ask: Pauses agent and emits notification instead of immediately killing on ambiguous trips */
+  pauseOnTrip?: boolean;
+  /** Historical 95th-percentile step baseline for adaptive threshold scaling */
+  percentileStepBaseline?: number;
+
   /** Tool names that should be gated by the async LLM Judge before execution (e.g. 'sendEmail', 'writeToDb') */
   highRiskTools?: string[];
   promptCostPerMillion?: number;
@@ -49,6 +74,7 @@ export interface MovenOptions {
   apiKey?: string;
   endpoint?: string; // default: https://moven.dev/api/events or local endpoint
   onKill?: (error: any) => void;
+  onPause?: (info: { agentName: string; reason: string; toolName?: string; args?: any; resumeToken: string }) => void;
   onHallucination?: (info: { agentName: string; reason: string; toolName?: string; args?: any }) => void;
   customCheck?: (state: MovenRunState) => { tripped: boolean; reason: string } | null;
 }
@@ -232,13 +258,35 @@ export class MovenRunState {
 
   public readonly checkpointManager = new MovenCheckpointManager();
 
+  public isSafeToRetryTool(toolName: string): boolean {
+    const list = this.options.safeToRetryTools || [
+      'check_build_status', 'poll_task', 'get_job_status', 'wait_for_lock', 
+      'check_status', 'poll_status', 'get_task_status', 'wait_for_job', 'poll'
+    ];
+    return list.some(item => toolName.toLowerCase().includes(item.toLowerCase()));
+  }
+
+  public isReadOnlyTool(toolName: string): boolean {
+    const defaultReadOnlyPrefixes = ['get_', 'fetch_', 'read_', 'list_', 'search_', 'query_', 'check_', 'describe_', 'inspect_', 'poll_'];
+    const customList = this.options.readOnlyTools || [];
+    const lower = toolName.toLowerCase();
+    return customList.includes(toolName) || defaultReadOnlyPrefixes.some(prefix => lower.startsWith(prefix));
+  }
+
   public recordToolCall(toolName: string, args: any): ToolCallLog {
     const argsHash = this.hashArguments(toolName, args);
+    const idempotencyKey = args?.idempotency_key || args?.idempotencyKey || args?.idempotency_token || args?.client_request_token;
+    const isPollingTool = this.isSafeToRetryTool(toolName);
+    const isReadOnly = this.isReadOnlyTool(toolName);
+
     const log: ToolCallLog = {
       toolName,
       args,
       argsHash,
       timestamp: Date.now(),
+      idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+      isPollingTool,
+      isReadOnly,
     };
     this.toolCalls.push(log);
     this.depth += 1;
@@ -272,6 +320,20 @@ export class MovenRunState {
       log.result = res;
       log.durationMs = durationMs || (Date.now() - log.timestamp);
 
+      // Compute and attach Result-Delta Hash (status / payload progression)
+      const resultHash = this.hashResultState(res);
+      log.resultHash = resultHash;
+
+      // Check if previous identical tool call had a different result (progressive external state)
+      const prevIdentical = this.toolCalls
+        .slice(0, -1)
+        .reverse()
+        .find(c => c.toolName === log.toolName && c.argsHash === log.argsHash);
+
+      if (prevIdentical && prevIdentical.resultHash && prevIdentical.resultHash !== resultHash) {
+        log.isResultProgressive = true;
+      }
+
       // Hash turn state for no-progress heuristic
       const turnHash = this.hashStateTurn(log.toolName, res);
       this.stateHashes.push(turnHash);
@@ -292,10 +354,6 @@ export class MovenRunState {
    * Record the agent's reasoning/thought text for the current step.
    * Call this after receiving the LLM response, before calling recordToolCall.
    * Compatible with: Claude <thinking>, OpenAI o-series reasoning, LangChain thought fields.
-   *
-   * @example
-   *   state.recordReasoning(llmResponse.thinking ?? llmResponse.content);
-   *   const log = state.recordToolCall(toolName, args);
    */
   public recordReasoning(step: string): void {
     if (!step || step.trim().length === 0) return;
@@ -333,6 +391,12 @@ export class MovenRunState {
     };
   }
 
+  /**
+   * Calculates recent repeat calls with Result-Delta Hashing and Polling Whitelisting.
+   * - If output state is progressing (status changes from pending -> building -> done), repeat count resets.
+   * - If tool is safe-to-retry / polling, it is allowed up to pollingTtlSeconds (default 600s).
+   * - If tool is read-only, threshold receives relaxed headroom.
+   */
   public getRecentRepeatCallsCount(timeWindowMs?: number): number {
     const window = timeWindowMs || this.options.repeatTimeWindowMs || 60000;
     if (this.toolCalls.length === 0) return 0;
@@ -340,9 +404,51 @@ export class MovenRunState {
     const lastCall = this.toolCalls[this.toolCalls.length - 1];
     const now = Date.now();
 
-    return this.toolCalls.filter(call => 
+    // 1. Check Safe-to-Retry / Long-Running Polling Tools
+    if (lastCall.isPollingTool) {
+      const pollingCalls = this.toolCalls.filter(c => c.toolName === lastCall.toolName && c.argsHash === lastCall.argsHash);
+      if (pollingCalls.length > 1) {
+        const firstPollTime = pollingCalls[0].timestamp;
+        const totalPollDurationSec = (now - firstPollTime) / 1000;
+        const ttlSec = this.options.pollingTtlSeconds || 600; // 10 minutes default
+
+        if (totalPollDurationSec > ttlSec) {
+          // Polling TTL exceeded — trip breaker
+          return this.options.maxRepeatCalls ? this.options.maxRepeatCalls + 1 : 10;
+        }
+
+        // If results are actively changing or within TTL, do NOT treat as stagnant loop!
+        const hasProgressiveResults = pollingCalls.some(c => c.isResultProgressive);
+        if (hasProgressiveResults || totalPollDurationSec <= ttlSec) {
+          return 1; // Valid non-stagnant polling
+        }
+      }
+    }
+
+    // 2. Result-Delta Hashing: Distinguish stagnant loop from evolving result state
+    const enableResultDelta = this.options.enableResultDeltaProgression !== false;
+    
+    const identicalArgsCalls = this.toolCalls.filter(call => 
       call.argsHash === lastCall.argsHash && (now - call.timestamp) <= window
-    ).length;
+    );
+
+    if (enableResultDelta && identicalArgsCalls.length > 1) {
+      // Find the last consecutive run of stagnant results (where both argsHash AND resultHash are identical)
+      const currentResultHash = lastCall.resultHash;
+      let stagnantCount = 0;
+      for (let i = identicalArgsCalls.length - 1; i >= 0; i--) {
+        const call = identicalArgsCalls[i];
+        if (call.resultHash === currentResultHash) {
+          stagnantCount++;
+        } else {
+          // Result differed in previous turn! External state changed. Break consecutive stagnant chain.
+          break;
+        }
+      }
+      return stagnantCount;
+    }
+
+    return identicalArgsCalls.length;
   }
 
   private canonicalStringify(obj: any): string {
@@ -363,6 +469,28 @@ export class MovenRunState {
       return crypto.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
     } catch {
       return `${toolName}_${Date.now()}`;
+    }
+  }
+
+  public hashResultState(result: any): string {
+    try {
+      if (result === undefined || result === null) return 'null_result';
+      // Extract status field if object contains it
+      let statePayload = result;
+      if (typeof result === 'object' && !Array.isArray(result)) {
+        if ('status' in result || 'state' in result || 'progress' in result || 'data' in result || 'id' in result) {
+          statePayload = {
+            status: result.status ?? result.state ?? result.progress,
+            id: result.id,
+            keys: Object.keys(result).sort(),
+            length: Array.isArray(result.data) ? result.data.length : undefined,
+          };
+        }
+      }
+      const canonical = this.canonicalStringify(statePayload);
+      return crypto.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
+    } catch {
+      return `res_${Date.now()}`;
     }
   }
 

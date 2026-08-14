@@ -3,6 +3,7 @@ import { MovenKillMetrics } from './errors';
 import { BurnGuardOptions } from './burn-guard';
 import { SemanticCacheOptions } from './semantic-cache';
 import { MovenCheckpointManager } from './checkpoint';
+import { SemanticFingerprintOptions, SemanticFingerprintEngine } from './semantic-fingerprint';
 
 export interface ToolCallLog {
   toolName: string;
@@ -11,6 +12,10 @@ export interface ToolCallLog {
   timestamp: number;
   result?: any;
   durationMs?: number;
+  /** Optional: the agent's raw reasoning/thought text that preceded this tool call */
+  reasoning?: string;
+  /** Goal-state hash of (reasoning intent + tool result) — set after recordToolResult */
+  intentHash?: string;
 }
 
 export interface MovenOptions {
@@ -36,6 +41,9 @@ export interface MovenOptions {
   enableLlmJudgeArbitrator?: boolean; // default: true
   burnGuard?: BurnGuardOptions; // Overnight Burn Guard ($2000 loss prevention engine)
   semanticCache?: SemanticCacheOptions; // Semantic caching engine options
+  semanticFingerprint?: SemanticFingerprintOptions; // Semantic Fingerprint loop detection layer
+  /** Tool names that should be gated by the async LLM Judge before execution (e.g. 'sendEmail', 'writeToDb') */
+  highRiskTools?: string[];
   promptCostPerMillion?: number;
   completionCostPerMillion?: number;
   apiKey?: string;
@@ -92,6 +100,13 @@ export class MovenRunState {
   public isFallbackActive: boolean = false;
   public cleanTurnsCount: number = 0;
   public options: MovenOptions;
+
+  /** Sliding window of the last N agent reasoning/thought strings */
+  public reasoningSteps: string[] = [];
+  /** Parallel array of goal-state hashes computed after each tool result */
+  public intentHashes: string[] = [];
+  /** Latest Progress Delta cosine similarity score (0–1). Updated on each evaluate(). */
+  public lastSemanticSimilarity: number = 0;
 
   constructor(options: MovenOptions = {}) {
     this.options = {
@@ -256,11 +271,52 @@ export class MovenRunState {
     if (log) {
       log.result = res;
       log.durationMs = durationMs || (Date.now() - log.timestamp);
-      
+
       // Hash turn state for no-progress heuristic
       const turnHash = this.hashStateTurn(log.toolName, res);
       this.stateHashes.push(turnHash);
+
+      // Compute and store the goal-state hash (intent + result) for Semantic Fingerprint
+      const intentText = log.reasoning || log.toolName;
+      const intentHash = SemanticFingerprintEngine.computeIntentHash(intentText, res);
+      log.intentHash = intentHash;
+
+      // Maintain the sliding window (max 10 entries)
+      const MAX_WINDOW = 10;
+      this.intentHashes.push(intentHash);
+      if (this.intentHashes.length > MAX_WINDOW) this.intentHashes.shift();
     }
+  }
+
+  /**
+   * Record the agent's reasoning/thought text for the current step.
+   * Call this after receiving the LLM response, before calling recordToolCall.
+   * Compatible with: Claude <thinking>, OpenAI o-series reasoning, LangChain thought fields.
+   *
+   * @example
+   *   state.recordReasoning(llmResponse.thinking ?? llmResponse.content);
+   *   const log = state.recordToolCall(toolName, args);
+   */
+  public recordReasoning(step: string): void {
+    if (!step || step.trim().length === 0) return;
+
+    const MAX_WINDOW = 10;
+    this.reasoningSteps.push(step.trim());
+    if (this.reasoningSteps.length > MAX_WINDOW) this.reasoningSteps.shift();
+
+    // Tag the most recent tool call with this reasoning text (if available)
+    if (this.toolCalls.length > 0) {
+      const last = this.toolCalls[this.toolCalls.length - 1];
+      if (!last.reasoning) last.reasoning = step.trim();
+    }
+  }
+
+  /**
+   * Returns true if the given tool name is declared as high-risk by the user,
+   * meaning the async LLM Judge must confirm progress before it executes.
+   */
+  public isHighRiskTool(toolName: string): boolean {
+    return (this.options.highRiskTools ?? []).includes(toolName);
   }
 
   public addCost(cost: number) {

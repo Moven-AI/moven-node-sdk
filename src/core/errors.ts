@@ -11,6 +11,7 @@ export type MovenHeuristicType =
   | 'cost_ceiling'
   | 'depth_ceiling'
   | 'no_progress_loop'
+  | 'semantic_loop'          // Semantic Fingerprint Layer: caught via cosine similarity / entropy
   | 'llm_judge_arbitrator'
   | 'ai_hallucination'
   | 'custom_rule';

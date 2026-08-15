@@ -27,6 +27,9 @@ export interface MovenOptions {
     runId?: string;
     agentId?: string;
     agentName?: string;
+    userId?: string;
+    userEmail?: string;
+    metadata?: Record<string, any>;
     framework?: string;
     version?: string;
     tags?: string[];
@@ -120,6 +123,16 @@ export declare class MovenRunState {
     isFallbackActive: boolean;
     cleanTurnsCount: number;
     options: MovenOptions;
+    /** User request / prompt driving this run */
+    userRequest: string;
+    /** System prompt defining agent role and constraints */
+    systemPrompt: string;
+    /** Chronological history of prompt turns (user, assistant, tool, system) */
+    prompts: {
+        role: string;
+        content: string;
+        timestamp: number;
+    }[];
     /** Sliding window of the last N agent reasoning/thought strings */
     reasoningSteps: string[];
     /** Parallel array of goal-state hashes computed after each tool result */
@@ -140,6 +153,9 @@ export declare class MovenRunState {
     /** Global backoff epoch in ms */
     globalBackoffUntil: number;
     constructor(options?: MovenOptions);
+    setUserRequest(request: string): void;
+    setSystemPrompt(prompt: string): void;
+    recordPrompt(content: string, role?: string): void;
     getModel(): string;
     getActiveModel(): string;
     switchToCheaperModel(): string;

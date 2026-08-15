@@ -2,10 +2,16 @@ export interface AgentCheckpointState {
   stepIndex: number;
   traceId: string;
   agentId: string;
+  stepName?: string;
+  model?: string;
+  systemPrompt?: string;
+  userPrompt?: string;
+  prompt?: string;
   lastToolCalled?: string;
   lastToolArgs?: any;
   messagesSnapshot?: any[];
   memorySnapshot?: Record<string, any>;
+  stateSnapshot?: Record<string, any>;
   cumulativeCost: number;
   parentCheckpointId?: string;
   isForked?: boolean;
@@ -24,7 +30,11 @@ export class MovenCheckpointManager {
     lastToolArgs?: any,
     cumulativeCost: number = 0,
     messagesSnapshot?: any[],
-    memorySnapshot?: Record<string, any>
+    memorySnapshot?: Record<string, any>,
+    systemPrompt?: string,
+    userPrompt?: string,
+    model?: string,
+    stepName?: string
   ): AgentCheckpointState {
     const parentId = this.checkpoints.length > 0 
       ? `ckpt_${traceId}_step_${this.checkpoints[this.checkpoints.length - 1].stepIndex}`
@@ -34,10 +44,16 @@ export class MovenCheckpointManager {
       stepIndex,
       traceId,
       agentId,
+      stepName: stepName || lastToolCalled || `step_${stepIndex}`,
+      model: model || 'gpt-4o',
+      systemPrompt,
+      userPrompt,
+      prompt: userPrompt,
       lastToolCalled,
       lastToolArgs,
       messagesSnapshot,
       memorySnapshot,
+      stateSnapshot: memorySnapshot || (messagesSnapshot ? { messages: messagesSnapshot } : { args: lastToolArgs }),
       cumulativeCost,
       parentCheckpointId: parentId,
       timestamp: Date.now(),

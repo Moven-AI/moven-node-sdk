@@ -53,6 +53,12 @@ class MovenRunState {
     isFallbackActive = false;
     cleanTurnsCount = 0;
     options;
+    /** User request / prompt driving this run */
+    userRequest = '';
+    /** System prompt defining agent role and constraints */
+    systemPrompt = '';
+    /** Chronological history of prompt turns (user, assistant, tool, system) */
+    prompts = [];
     /** Sliding window of the last N agent reasoning/thought strings */
     reasoningSteps = [];
     /** Parallel array of goal-state hashes computed after each tool result */
@@ -96,6 +102,23 @@ class MovenRunState {
         this.tags = this.options.tags || ['production'];
         this.startTime = Date.now();
         this.activeModel = this.options.currentModel || 'openai/gpt-4o-mini';
+        if (options.metadata?.user_request || options.metadata?.userRequest) {
+            this.userRequest = options.metadata.user_request || options.metadata.userRequest;
+        }
+        if (options.metadata?.system_prompt || options.metadata?.systemPrompt) {
+            this.systemPrompt = options.metadata.system_prompt || options.metadata.systemPrompt;
+        }
+    }
+    setUserRequest(request) {
+        this.userRequest = request;
+        this.recordPrompt(request, 'user');
+    }
+    setSystemPrompt(prompt) {
+        this.systemPrompt = prompt;
+        this.recordPrompt(prompt, 'system');
+    }
+    recordPrompt(content, role = 'user') {
+        this.prompts.push({ role, content, timestamp: Date.now() });
     }
     getModel() {
         return this.activeModel;
@@ -219,8 +242,8 @@ class MovenRunState {
         };
         this.toolCalls.push(log);
         this.depth += 1;
-        // Snapshot Ctrl+Z step checkpoint
-        this.checkpointManager.createCheckpoint(this.runId, this.agentId, this.depth, toolName, args, this.cumulativeCost);
+        // Snapshot Ctrl+Z step checkpoint with prompt & state context
+        this.checkpointManager.createCheckpoint(this.runId, this.agentId, this.depth, toolName, args, this.cumulativeCost, undefined, { toolArgs: args, reasoning: this.reasoningSteps[this.reasoningSteps.length - 1] }, this.systemPrompt, this.userRequest || (typeof args?.prompt === 'string' ? args.prompt : undefined), this.activeModel, `Step ${this.depth}: ${toolName}`);
         return log;
     }
     recordToolResult(logOrResult, result, durationMs) {

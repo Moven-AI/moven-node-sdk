@@ -106,6 +106,16 @@ class MovenReporter {
             framework: state.framework,
             version: state.version,
             tags: state.tags,
+            userId: state.options.userId || state.options.userEmail,
+            user_request: state.userRequest || (state.options.metadata?.user_request) || (state.options.metadata?.userRequest),
+            system_prompt: state.systemPrompt || (state.options.metadata?.system_prompt) || (state.options.metadata?.systemPrompt),
+            prompts: state.prompts,
+            checkpoints: state.checkpointManager.getCheckpoints(),
+            metadata: {
+                ...(state.options.metadata || {}),
+                user_request: state.userRequest,
+                system_prompt: state.systemPrompt,
+            },
             heuristic: error.heuristic,
             reason: error.reason,
             toolName: error.toolName,
@@ -137,6 +147,52 @@ class MovenReporter {
         }
     }
     /**
+     * Reports a completed normal trace execution with full prompt, spans, and checkpoints.
+     */
+    async reportTrace(state, extra) {
+        const payload = {
+            event: 'tool',
+            runId: state.runId,
+            agentId: state.agentId,
+            agentName: state.agentName,
+            framework: state.framework,
+            version: state.version,
+            tags: state.tags,
+            userId: state.options.userId || state.options.userEmail,
+            user_request: state.userRequest || extra?.user_request || 'Autonomous agent execution',
+            system_prompt: state.systemPrompt || extra?.system_prompt,
+            prompts: state.prompts,
+            checkpoints: state.checkpointManager.getCheckpoints(),
+            toolCalls: state.toolCalls,
+            metrics: {
+                totalCost: state.cumulativeCost,
+                totalToolCalls: state.toolCalls.length,
+                durationMs: Date.now() - state.startTime,
+            },
+            metadata: {
+                ...(state.options.metadata || {}),
+                user_request: state.userRequest,
+                system_prompt: state.systemPrompt,
+                ...(extra || {}),
+            },
+            timestamp: new Date().toISOString(),
+        };
+        try {
+            const headers = { 'Content-Type': 'application/json' };
+            if (this.apiKey)
+                headers['x-moven-api-key'] = this.apiKey;
+            const res = await this.fetchWithRetry(this.endpoint, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(payload),
+            });
+            return res.ok;
+        }
+        catch {
+            return false;
+        }
+    }
+    /**
      * Sends the agent's initial configuration to the backend on run start.
      * This upserts the agent record in the `agents` table so the dashboard
      * always reflects the live SDK settings (thresholds, cheaper model, etc).
@@ -150,6 +206,8 @@ class MovenReporter {
             framework: state.framework,
             version: state.version,
             tags: state.tags,
+            user_request: state.userRequest,
+            system_prompt: state.systemPrompt,
             timestamp: new Date().toISOString(),
             // Send full agent circuit breaker settings so backend can upsert them
             agentConfig: {

@@ -26,6 +26,10 @@ export declare class MovenReporter {
     } | null>;
     reportKillEvent(error: MovenKillError, state: MovenRunState): Promise<boolean>;
     /**
+     * Reports a completed normal trace execution with full prompt, spans, and checkpoints.
+     */
+    reportTrace(state: MovenRunState, extra?: Record<string, any>): Promise<boolean>;
+    /**
      * Sends the agent's initial configuration to the backend on run start.
      * This upserts the agent record in the `agents` table so the dashboard
      * always reflects the live SDK settings (thresholds, cheaper model, etc).

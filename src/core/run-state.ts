@@ -30,6 +30,9 @@ export interface MovenOptions {
   runId?: string;
   agentId?: string; // Unique agent identifier (e.g. 'agent_inventory_prod_01')
   agentName?: string; // Production agent name identifier
+  userId?: string; // End-user / person identifier (e.g. 'user_88241', 'srini@company.com')
+  userEmail?: string; // Optional user email
+  metadata?: Record<string, any>; // Arbitrary custom metadata tags
   framework?: string; // Agent framework (e.g. 'LangGraph / LangChain', 'Vercel AI SDK')
   version?: string; // Agent version identifier
   tags?: string[]; // Environment or category tags
@@ -145,6 +148,13 @@ export class MovenRunState {
   public cleanTurnsCount: number = 0;
   public options: MovenOptions;
 
+  /** User request / prompt driving this run */
+  public userRequest: string = '';
+  /** System prompt defining agent role and constraints */
+  public systemPrompt: string = '';
+  /** Chronological history of prompt turns (user, assistant, tool, system) */
+  public prompts: { role: string; content: string; timestamp: number }[] = [];
+
   /** Sliding window of the last N agent reasoning/thought strings */
   public reasoningSteps: string[] = [];
   /** Parallel array of goal-state hashes computed after each tool result */
@@ -190,6 +200,26 @@ export class MovenRunState {
     this.tags = this.options.tags || ['production'];
     this.startTime = Date.now();
     this.activeModel = this.options.currentModel || 'openai/gpt-4o-mini';
+    if (options.metadata?.user_request || options.metadata?.userRequest) {
+      this.userRequest = options.metadata.user_request || options.metadata.userRequest;
+    }
+    if (options.metadata?.system_prompt || options.metadata?.systemPrompt) {
+      this.systemPrompt = options.metadata.system_prompt || options.metadata.systemPrompt;
+    }
+  }
+
+  public setUserRequest(request: string) {
+    this.userRequest = request;
+    this.recordPrompt(request, 'user');
+  }
+
+  public setSystemPrompt(prompt: string) {
+    this.systemPrompt = prompt;
+    this.recordPrompt(prompt, 'system');
+  }
+
+  public recordPrompt(content: string, role: string = 'user') {
+    this.prompts.push({ role, content, timestamp: Date.now() });
   }
 
   public getModel(): string {
@@ -326,14 +356,20 @@ export class MovenRunState {
     this.toolCalls.push(log);
     this.depth += 1;
 
-    // Snapshot Ctrl+Z step checkpoint
+    // Snapshot Ctrl+Z step checkpoint with prompt & state context
     this.checkpointManager.createCheckpoint(
       this.runId,
       this.agentId,
       this.depth,
       toolName,
       args,
-      this.cumulativeCost
+      this.cumulativeCost,
+      undefined,
+      { toolArgs: args, reasoning: this.reasoningSteps[this.reasoningSteps.length - 1] },
+      this.systemPrompt,
+      this.userRequest || (typeof args?.prompt === 'string' ? args.prompt : undefined),
+      this.activeModel,
+      `Step ${this.depth}: ${toolName}`
     );
 
     return log;

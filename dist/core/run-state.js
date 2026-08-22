@@ -7,6 +7,7 @@ exports.MovenRunState = exports.DEFAULT_CHEAPER_MODEL_MAP = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 const checkpoint_1 = require("./checkpoint");
 const semantic_fingerprint_1 = require("./semantic-fingerprint");
+const pricing_1 = require("./pricing");
 exports.DEFAULT_CHEAPER_MODEL_MAP = {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-3-haiku-20240307',
@@ -102,6 +103,8 @@ class MovenRunState {
         this.tags = this.options.tags || ['production'];
         this.startTime = Date.now();
         this.activeModel = this.options.currentModel || 'openai/gpt-4o-mini';
+        // Always trigger dynamic live pricing engine refresh
+        pricing_1.MovenDynamicPricingEngine.refreshLivePricing();
         if (options.metadata?.user_request || options.metadata?.userRequest) {
             this.userRequest = options.metadata.user_request || options.metadata.userRequest;
         }
@@ -242,6 +245,12 @@ class MovenRunState {
         };
         this.toolCalls.push(log);
         this.depth += 1;
+        // Dynamically calculate and accumulate step cost using MovenDynamicPricingEngine
+        const rates = pricing_1.MovenDynamicPricingEngine.getModelRates(this.activeModel);
+        const promptRate = this.options.promptCostPerMillion || rates.promptPerMillion;
+        const compRate = this.options.completionCostPerMillion || rates.completionPerMillion;
+        const stepCost = (3500 / 1_000_000) * promptRate + (500 / 1_000_000) * compRate;
+        this.cumulativeCost += stepCost;
         // Snapshot Ctrl+Z step checkpoint with prompt & state context
         this.checkpointManager.createCheckpoint(this.runId, this.agentId, this.depth, toolName, args, this.cumulativeCost, undefined, { toolArgs: args, reasoning: this.reasoningSteps[this.reasoningSteps.length - 1] }, this.systemPrompt, this.userRequest || (typeof args?.prompt === 'string' ? args.prompt : undefined), this.activeModel, `Step ${this.depth}: ${toolName}`);
         return log;

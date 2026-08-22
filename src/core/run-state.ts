@@ -4,6 +4,7 @@ import { BurnGuardOptions } from './burn-guard';
 import { SemanticCacheOptions } from './semantic-cache';
 import { MovenCheckpointManager } from './checkpoint';
 import { SemanticFingerprintOptions, SemanticFingerprintEngine } from './semantic-fingerprint';
+import { MovenDynamicPricingEngine } from './pricing';
 
 export interface ToolCallLog {
   toolName: string;
@@ -200,6 +201,10 @@ export class MovenRunState {
     this.tags = this.options.tags || ['production'];
     this.startTime = Date.now();
     this.activeModel = this.options.currentModel || 'openai/gpt-4o-mini';
+    
+    // Always trigger dynamic live pricing engine refresh
+    MovenDynamicPricingEngine.refreshLivePricing();
+
     if (options.metadata?.user_request || options.metadata?.userRequest) {
       this.userRequest = options.metadata.user_request || options.metadata.userRequest;
     }
@@ -355,6 +360,13 @@ export class MovenRunState {
     };
     this.toolCalls.push(log);
     this.depth += 1;
+
+    // Dynamically calculate and accumulate step cost using MovenDynamicPricingEngine
+    const rates = MovenDynamicPricingEngine.getModelRates(this.activeModel);
+    const promptRate = this.options.promptCostPerMillion || rates.promptPerMillion;
+    const compRate = this.options.completionCostPerMillion || rates.completionPerMillion;
+    const stepCost = (3500 / 1_000_000) * promptRate + (500 / 1_000_000) * compRate;
+    this.cumulativeCost += stepCost;
 
     // Snapshot Ctrl+Z step checkpoint with prompt & state context
     this.checkpointManager.createCheckpoint(

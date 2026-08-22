@@ -164,6 +164,8 @@ export class MovenKillHandler {
       modelName: activeModel,
       totalToolCallsMade: metrics.totalToolCalls,
       actualCostSpent: metrics.totalCost,
+      actualPromptTokensSpent: metrics.promptTokens ?? state.cumulativePromptTokens,
+      actualCompletionTokensSpent: metrics.completionTokens ?? state.cumulativeCompletionTokens,
       customPromptRatePerMillion: customPromptRate,
       customCompletionRatePerMillion: customCompletionRate,
     });
@@ -173,7 +175,7 @@ export class MovenKillHandler {
     const completionPerMillion = calc.completionPerMillion;
     const totalPreventedTokens = calc.totalPreventedTokens;
     const preventedRunawaySteps = calc.preventedRunawaySteps;
-    const actualCost = metrics.totalCost || 0.001;
+    const actualCost = metrics.totalCost || 0;
 
     console.error(`\x1b[32m\x1b[1m💰 MONEY SAVED:\x1b[0m \x1b[32m\x1b[1m$${moneySaved >= 0.01 ? moneySaved.toFixed(2) : moneySaved.toFixed(4)}\x1b[0m \x1b[90m[Model: ${activeModel} | OpenRouter Live Rates: $${promptPerMillion}/1M in, $${completionPerMillion}/1M out | Math: ${preventedRunawaySteps} runaway turns prevented (${totalPreventedTokens.toLocaleString()} tokens prevented) - $${actualCost.toFixed(4)} spent]\x1b[0m\n`);
 

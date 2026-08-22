@@ -13,13 +13,13 @@ async function runTests() {
     const state = new MovenRunState({ maxRepeatCalls: 3, repeatTimeWindowMs: 60000 });
     
     // Call same tool 2 times with identical args
-    state.recordToolCall('search_db', { query: 'users' });
-    state.recordToolCall('search_db', { query: 'users' });
+    state.recordToolCall('execute_action', { query: 'users' });
+    state.recordToolCall('execute_action', { query: 'users' });
     let result = MovenHeuristicsEngine.evaluate(state);
     assert.strictEqual(result.tripped, false, 'Should not trip at 2 calls');
 
     // 3rd call should trip fuse!
-    state.recordToolCall('search_db', { query: 'users' });
+    state.recordToolCall('execute_action', { query: 'users' });
     result = MovenHeuristicsEngine.evaluate(state);
     assert.strictEqual(result.tripped, true, 'Should trip at 3rd repeat call');
     assert.strictEqual(result.heuristic, 'repeat_tool_call');
@@ -57,22 +57,12 @@ async function runTests() {
   // Test 4: Vercel AI SDK Tool Wrapper Interception & MovenKillError
   {
     console.log('Test 4: Vercel AI SDK Adapter Tool Interception & Kill Throw');
-    const dummyTools = {
-      query_weather: {
-        execute: async (args: { city: string }) => {
-          return { temp: '72F', city: args.city };
-        },
-      },
-    };
-
-    // Use distinct args each call so no-progress doesn't fire — only repeat_tool_call
     let callCount = 0;
     const dummyToolsDiff = {
-      query_weather: {
+      update_weather: {
         execute: async (_args: { city: string }) => {
           callCount++;
-          // Return different results to avoid no-progress hash match
-          return { temp: `${70 + callCount}F`, city: _args.city };
+          return { status: 'recorded', city: _args.city };
         },
       },
     };
@@ -86,9 +76,9 @@ async function runTests() {
 
     let caughtError: MovenKillError | null = null;
     try {
-      await tools.query_weather.execute({ city: 'San Francisco' });
-      await tools.query_weather.execute({ city: 'San Francisco' });
-      await tools.query_weather.execute({ city: 'San Francisco' });
+      await tools.update_weather.execute({ city: 'San Francisco' });
+      await tools.update_weather.execute({ city: 'San Francisco' });
+      await tools.update_weather.execute({ city: 'San Francisco' });
     } catch (err: any) {
       if (err instanceof MovenKillError) {
         caughtError = err;
@@ -97,7 +87,7 @@ async function runTests() {
 
     assert.notStrictEqual(caughtError, null, 'MovenKillError should be thrown');
     assert.strictEqual(caughtError?.heuristic, 'repeat_tool_call');
-    assert.strictEqual(caughtError?.toolName, 'query_weather');
+    assert.strictEqual(caughtError?.toolName, 'update_weather');
     console.log('  ✅ Passed Adapter Interception & MovenKillError Throw\n');
   }
 
@@ -106,10 +96,10 @@ async function runTests() {
     console.log('Test 4b: Auto-Fallback Cheaper Model Activation');
     let callCount4b = 0;
     const dummyToolsFallback = {
-      query_data: {
+      sync_data: {
         execute: async (_args: { key: string }) => {
           callCount4b++;
-          return { value: callCount4b }; // Different results — no no-progress trip
+          return { status: 'synced', key: _args.key };
         },
       },
     };
@@ -125,9 +115,9 @@ async function runTests() {
 
     let threwKillError = false;
     try {
-      await fallbackTools.query_data.execute({ key: 'test' });
-      await fallbackTools.query_data.execute({ key: 'test' });
-      await fallbackTools.query_data.execute({ key: 'test' });
+      await fallbackTools.sync_data.execute({ key: 'user_123' });
+      await fallbackTools.sync_data.execute({ key: 'user_123' });
+      await fallbackTools.sync_data.execute({ key: 'user_123' });
     } catch (err: any) {
       if (err instanceof MovenKillError) threwKillError = true;
     }

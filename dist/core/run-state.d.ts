@@ -116,6 +116,9 @@ export declare class MovenRunState {
     readonly startTime: number;
     toolCalls: ToolCallLog[];
     depth: number;
+    cumulativePromptTokens: number;
+    cumulativeCompletionTokens: number;
+    cumulativeTotalTokens: number;
     cumulativeCost: number;
     stateHashes: string[];
     isKilled: boolean;
@@ -169,7 +172,7 @@ export declare class MovenRunState {
     recordToolResult(logOrResult: ToolCallLog | any, result?: any, durationMs?: number): void;
     recordCallOutcome(success: boolean, latencyMs?: number, isSchemaFailure?: boolean): void;
     recordSchemaValidationFailure(toolName?: string, errorMsg?: string): void;
-    recordStepTokens(tokens: number): void;
+    recordStepTokens(promptTokens: number, completionTokens?: number): void;
     getRecentErrorRate(): number;
     getRecentSlowCallRate(thresholdMs?: number): number;
     setGlobalBackoff(durationMs: number): void;

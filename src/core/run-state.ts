@@ -141,6 +141,9 @@ export class MovenRunState {
   public readonly startTime: number;
   public toolCalls: ToolCallLog[] = [];
   public depth: number = 0;
+  public cumulativePromptTokens: number = 0;
+  public cumulativeCompletionTokens: number = 0;
+  public cumulativeTotalTokens: number = 0;
   public cumulativeCost: number = 0;
   public stateHashes: string[] = [];
   public isKilled: boolean = false;
@@ -361,12 +364,29 @@ export class MovenRunState {
     this.toolCalls.push(log);
     this.depth += 1;
 
-    // Dynamically calculate and accumulate step cost using MovenDynamicPricingEngine
-    const rates = MovenDynamicPricingEngine.getModelRates(this.activeModel);
-    const promptRate = this.options.promptCostPerMillion || rates.promptPerMillion;
-    const compRate = this.options.completionCostPerMillion || rates.completionPerMillion;
-    const stepCost = (3500 / 1_000_000) * promptRate + (500 / 1_000_000) * compRate;
-    this.cumulativeCost += stepCost;
+    // 1. Calculate actual / estimated tokens for this step
+    const promptTokens = Math.max(
+      MovenDynamicPricingEngine.estimateTokens(args) +
+        MovenDynamicPricingEngine.estimateTokens(toolName) +
+        Math.round(MovenDynamicPricingEngine.estimateTokens(this.systemPrompt) * 0.2) +
+        Math.round(MovenDynamicPricingEngine.estimateTokens(this.userRequest) * 0.3),
+      50
+    );
+    const completionTokens = 150; // Initial token allocation for tool execution dispatch
+
+    // 2. Dynamically calculate exact per-token step cost
+    const costData = MovenDynamicPricingEngine.calculateStepTokenCost({
+      promptTokens,
+      completionTokens,
+      modelName: this.activeModel,
+      customPromptRatePerMillion: this.options.promptCostPerMillion,
+      customCompletionRatePerMillion: this.options.completionCostPerMillion,
+    });
+
+    this.cumulativePromptTokens += promptTokens;
+    this.cumulativeCompletionTokens += completionTokens;
+    this.cumulativeTotalTokens += costData.totalTokens;
+    this.cumulativeCost += costData.stepCost;
 
     // Snapshot Ctrl+Z step checkpoint with prompt & state context
     this.checkpointManager.createCheckpoint(
@@ -454,8 +474,21 @@ export class MovenRunState {
     this.recordCallOutcome(false, 0, true);
   }
 
-  public recordStepTokens(tokens: number): void {
-    this.lastStepTokenCount = tokens;
+  public recordStepTokens(promptTokens: number, completionTokens: number = 0): void {
+    const total = promptTokens + completionTokens;
+    this.lastStepTokenCount = total;
+    this.cumulativePromptTokens += promptTokens;
+    this.cumulativeCompletionTokens += completionTokens;
+    this.cumulativeTotalTokens += total;
+
+    const costData = MovenDynamicPricingEngine.calculateStepTokenCost({
+      promptTokens,
+      completionTokens,
+      modelName: this.activeModel,
+      customPromptRatePerMillion: this.options.promptCostPerMillion,
+      customCompletionRatePerMillion: this.options.completionCostPerMillion,
+    });
+    this.cumulativeCost += costData.stepCost;
   }
 
   public getRecentErrorRate(): number {
@@ -507,12 +540,33 @@ export class MovenRunState {
   }
 
   public getMetrics(): MovenKillMetrics {
+    const rates = MovenDynamicPricingEngine.getModelRates(this.activeModel);
+    const promptRate = this.options.promptCostPerMillion ?? rates.promptPerMillion;
+    const compRate = this.options.completionCostPerMillion ?? rates.completionPerMillion;
+
+    const savings = MovenDynamicPricingEngine.calculateMoneySaved({
+      modelName: this.activeModel,
+      totalToolCallsMade: this.toolCalls.length,
+      actualCostSpent: this.cumulativeCost,
+      actualPromptTokensSpent: this.cumulativePromptTokens,
+      actualCompletionTokensSpent: this.cumulativeCompletionTokens,
+      customPromptRatePerMillion: promptRate,
+      customCompletionRatePerMillion: compRate,
+    });
+
     return {
       totalCost: Number(this.cumulativeCost.toFixed(4)),
       totalToolCalls: this.toolCalls.length,
       repeatCallsCount: this.getRecentRepeatCallsCount(),
       depth: this.depth,
       durationMs: Date.now() - this.startTime,
+      totalTokens: this.cumulativeTotalTokens,
+      promptTokens: this.cumulativePromptTokens,
+      completionTokens: this.cumulativeCompletionTokens,
+      costPerPromptToken: promptRate / 1_000_000,
+      costPerCompletionToken: compRate / 1_000_000,
+      moneySaved: savings.moneySaved,
+      preventedTokens: savings.totalPreventedTokens,
     };
   }
 

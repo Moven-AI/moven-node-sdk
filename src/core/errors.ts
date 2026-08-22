@@ -4,6 +4,13 @@ export interface MovenKillMetrics {
   repeatCallsCount: number;
   depth: number;
   durationMs: number;
+  totalTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  costPerPromptToken?: number;
+  costPerCompletionToken?: number;
+  moneySaved?: number;
+  preventedTokens?: number;
 }
 
 export type MovenHeuristicType = 

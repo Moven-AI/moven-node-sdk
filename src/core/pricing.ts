@@ -138,47 +138,130 @@ export class MovenDynamicPricingEngine {
   }
 
   /**
-   * Transparent calculation of money saved when an infinite / runaway loop is tripped
+   * Estimates token count from arbitrary text or structured payloads using ~4 chars/token heuristic
+   */
+  public static estimateTokens(payload: any): number {
+    if (payload === undefined || payload === null) return 0;
+    try {
+      const str = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      return Math.max(Math.ceil(str.length / 4), 1);
+    } catch {
+      return 10;
+    }
+  }
+
+  /**
+   * Calculates exact per-token cost for an individual step or execution turn
+   */
+  public static calculateStepTokenCost(params: {
+    promptTokens: number;
+    completionTokens: number;
+    modelName?: string;
+    customPromptRatePerMillion?: number;
+    customCompletionRatePerMillion?: number;
+  }): {
+    stepCost: number;
+    promptCost: number;
+    completionCost: number;
+    totalTokens: number;
+    costPerPromptToken: number;
+    costPerCompletionToken: number;
+  } {
+    const rates = this.getModelRates(params.modelName);
+    const promptRatePerMillion = params.customPromptRatePerMillion ?? rates.promptPerMillion;
+    const completionRatePerMillion = params.customCompletionRatePerMillion ?? rates.completionPerMillion;
+
+    const costPerPromptToken = promptRatePerMillion / 1_000_000;
+    const costPerCompletionToken = completionRatePerMillion / 1_000_000;
+
+    const promptCost = params.promptTokens * costPerPromptToken;
+    const completionCost = params.completionTokens * costPerCompletionToken;
+    const stepCost = promptCost + completionCost;
+
+    return {
+      stepCost,
+      promptCost,
+      completionCost,
+      totalTokens: params.promptTokens + params.completionTokens,
+      costPerPromptToken,
+      costPerCompletionToken,
+    };
+  }
+
+  /**
+   * Accurate calculation of money saved when an infinite / runaway loop is tripped.
+   * First computes exact token counts used and per-token unit rates, then multiplies prevented tokens.
    */
   public static calculateMoneySaved(params: {
     modelName?: string;
     totalToolCallsMade: number;
     actualCostSpent?: number;
+    actualPromptTokensSpent?: number;
+    actualCompletionTokensSpent?: number;
     customPromptRatePerMillion?: number;
     customCompletionRatePerMillion?: number;
   }): {
     moneySaved: number;
     preventedRunawaySteps: number;
     totalPreventedTokens: number;
+    preventedPromptTokens: number;
+    preventedCompletionTokens: number;
     promptPerMillion: number;
     completionPerMillion: number;
+    costPerPromptToken: number;
+    costPerCompletionToken: number;
     activeModel: string;
   } {
     const activeModel = params.modelName || 'openai/gpt-4o-mini';
     const rates = this.getModelRates(activeModel);
 
-    const promptPerMillion = params.customPromptRatePerMillion || rates.promptPerMillion;
-    const completionPerMillion = params.customCompletionRatePerMillion || rates.completionPerMillion;
-    const actualCost = params.actualCostSpent || 0.001;
+    const promptPerMillion = params.customPromptRatePerMillion ?? rates.promptPerMillion;
+    const completionPerMillion = params.customCompletionRatePerMillion ?? rates.completionPerMillion;
+    const actualCost = params.actualCostSpent || 0;
 
-    // Realistic token breakdown per agent step: 3,500 input tokens + 500 output tokens
-    const avgInputTokensPerStep = 3500;
-    const avgOutputTokensPerStep = 500;
-    const preventedRunawaySteps = Math.max(15 - params.totalToolCallsMade, 5);
-    const totalPreventedTokens = preventedRunawaySteps * (avgInputTokensPerStep + avgOutputTokensPerStep);
+    // Unit rate per single token
+    const costPerPromptToken = promptPerMillion / 1_000_000;
+    const costPerCompletionToken = completionPerMillion / 1_000_000;
 
-    const preventedInputCost = (preventedRunawaySteps * avgInputTokensPerStep / 1_000_000) * promptPerMillion;
-    const preventedOutputCost = (preventedRunawaySteps * avgOutputTokensPerStep / 1_000_000) * completionPerMillion;
-    const totalPreventedCost = preventedInputCost + preventedOutputCost;
+    // 1. Determine actual average token usage per step from this run
+    let avgPromptTokensPerStep: number;
+    let avgOutputTokensPerStep: number;
 
-    const moneySaved = Math.max(totalPreventedCost - actualCost, 0.001);
+    if (params.actualPromptTokensSpent && params.totalToolCallsMade > 0) {
+      avgPromptTokensPerStep = Math.max(Math.round(params.actualPromptTokensSpent / params.totalToolCallsMade), 100);
+    } else {
+      avgPromptTokensPerStep = 2500;
+    }
+
+    if (params.actualCompletionTokensSpent && params.totalToolCallsMade > 0) {
+      avgOutputTokensPerStep = Math.max(Math.round(params.actualCompletionTokensSpent / params.totalToolCallsMade), 50);
+    } else {
+      avgOutputTokensPerStep = 500;
+    }
+
+    // 2. Typical runaway unconstrained loop would spin ~15-50 extra turns
+    const preventedRunawaySteps = Math.max(15 - params.totalToolCallsMade, 10);
+    const preventedPromptTokens = preventedRunawaySteps * avgPromptTokensPerStep;
+    const preventedCompletionTokens = preventedRunawaySteps * avgOutputTokensPerStep;
+    const totalPreventedTokens = preventedPromptTokens + preventedCompletionTokens;
+
+    // 3. Exact per-token cost calculation for prevented tokens
+    const preventedPromptCost = preventedPromptTokens * costPerPromptToken;
+    const preventedCompletionCost = preventedCompletionTokens * costPerCompletionToken;
+    const totalPreventedCost = preventedPromptCost + preventedCompletionCost;
+
+    const moneySaved = Number(Math.max(totalPreventedCost - actualCost, 0.001).toFixed(4));
 
     return {
       moneySaved,
       preventedRunawaySteps,
       totalPreventedTokens,
+      preventedPromptTokens,
+      preventedCompletionTokens,
       promptPerMillion,
       completionPerMillion,
+      costPerPromptToken,
+      costPerCompletionToken,
       activeModel,
     };
   }

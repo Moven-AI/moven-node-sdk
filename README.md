@@ -188,6 +188,14 @@ export const moven = createMovenCircuitBreaker({
 
 ---
 
+## 💬 Community & Support
+
+- **Discord**: [Join the Moven Discord Community](https://discord.gg/Um6naf4c6Y)
+- **Twitter / X**: [@movendev](https://x.com/movendev)
+- **Website**: [moven.dev](https://moven.dev)
+
+---
+
 ## 📜 License
 
 MIT © [Moven AI](https://moven.dev)

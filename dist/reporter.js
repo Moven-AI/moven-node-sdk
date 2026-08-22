@@ -10,13 +10,13 @@ class MovenReporter {
     constructor(apiKeyOrOptions, endpoint) {
         if (typeof apiKeyOrOptions === 'object' && apiKeyOrOptions !== null) {
             this.apiKey = apiKeyOrOptions.apiKey || (typeof process !== 'undefined' ? process.env.MOVEN_API_KEY : undefined);
-            this.endpoint = apiKeyOrOptions.endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'http://localhost:3000/api/events';
+            this.endpoint = apiKeyOrOptions.endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'https://api.moven.dev/events';
             this.maxRetries = apiKeyOrOptions.maxRetries ?? 3;
             this.timeoutMs = apiKeyOrOptions.timeoutMs ?? 5000;
         }
         else {
             this.apiKey = apiKeyOrOptions || (typeof process !== 'undefined' ? process.env.MOVEN_API_KEY : undefined);
-            this.endpoint = endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'http://localhost:3000/api/events';
+            this.endpoint = endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'https://api.moven.dev/events';
             this.maxRetries = 3;
             this.timeoutMs = 5000;
         }

@@ -93,7 +93,7 @@ export interface MovenOptions {
   promptCostPerMillion?: number;
   completionCostPerMillion?: number;
   apiKey?: string;
-  endpoint?: string; // default: https://moven.dev/api/events or local endpoint
+  endpoint?: string; // default: https://api.moven.dev/events
   onKill?: (error: any) => void;
   onPause?: (info: { agentName: string; reason: string; toolName?: string; args?: any; resumeToken: string }) => void;
   onHallucination?: (info: { agentName: string; reason: string; toolName?: string; args?: any }) => void;

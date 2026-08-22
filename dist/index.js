@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
+exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenDynamicPricingEngine = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
 var run_state_1 = require("./core/run-state");
 Object.defineProperty(exports, "MovenRunState", { enumerable: true, get: function () { return run_state_1.MovenRunState; } });
 Object.defineProperty(exports, "DEFAULT_CHEAPER_MODEL_MAP", { enumerable: true, get: function () { return run_state_1.DEFAULT_CHEAPER_MODEL_MAP; } });
@@ -22,6 +22,8 @@ var abort_1 = require("./kill/abort");
 Object.defineProperty(exports, "MovenKillHandler", { enumerable: true, get: function () { return abort_1.MovenKillHandler; } });
 var reporter_1 = require("./reporter");
 Object.defineProperty(exports, "MovenReporter", { enumerable: true, get: function () { return reporter_1.MovenReporter; } });
+var pricing_1 = require("./core/pricing");
+Object.defineProperty(exports, "MovenDynamicPricingEngine", { enumerable: true, get: function () { return pricing_1.MovenDynamicPricingEngine; } });
 // Multi-Framework Tool Adapters
 var vercel_ai_sdk_1 = require("./adapters/vercel-ai-sdk");
 Object.defineProperty(exports, "wrapToolsWithMoven", { enumerable: true, get: function () { return vercel_ai_sdk_1.wrapToolsWithMoven; } });

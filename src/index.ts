@@ -24,6 +24,8 @@ export type { MovenKillMetrics, MovenHeuristicType } from './core/errors';
 
 export { MovenKillHandler } from './kill/abort';
 export { MovenReporter } from './reporter';
+export { MovenDynamicPricingEngine } from './core/pricing';
+export type { ModelTokenRates } from './core/pricing';
 
 // Multi-Framework Tool Adapters
 export { wrapToolsWithMoven, createMovenCircuitBreaker } from './adapters/vercel-ai-sdk';

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenKillHandler = void 0;
 const errors_1 = require("../core/errors");
+const pricing_1 = require("../core/pricing");
 class MovenKillHandler {
     /**
      * Handles a heuristic trip result by checking dry-run mode, soft pause, auto-fallback, or throwing MovenKillError.
@@ -117,27 +118,33 @@ class MovenKillHandler {
             console.error(`\x1b[31m\x1b[1m📋 ARGUMENTS:\x1b[0m \x1b[90m${JSON.stringify(tripResult.toolArgs || {})}\x1b[0m`);
         }
         const metrics = tripResult.metrics || state.getMetrics();
-        const actualCost = metrics.totalCost || 0.01;
-        let targetModelName = state.getCheaperModel() || state.options.currentModel || state.options.judgeModel || 'openai/gpt-4o-mini';
-        let promptPerMillion = state.options.promptCostPerMillion || 0.15;
-        let completionPerMillion = state.options.completionCostPerMillion || 0.60;
+        const activeModel = state.options.currentModel || state.getCheaperModel() || 'openai/gpt-4o-mini';
+        let customPromptRate = state.options.promptCostPerMillion;
+        let customCompletionRate = state.options.completionCostPerMillion;
         if (reporter) {
             try {
                 const judgeData = await reporter.queryJudgeArbitrator(state);
                 if (judgeData && judgeData.pricing) {
-                    targetModelName = judgeData.cheaperModel || judgeData.judgeModel || targetModelName;
-                    promptPerMillion = judgeData.pricing.promptPerMillion;
-                    completionPerMillion = judgeData.pricing.completionPerMillion;
+                    customPromptRate = judgeData.pricing.promptPerMillion;
+                    customCompletionRate = judgeData.pricing.completionPerMillion;
                 }
             }
             catch { }
         }
-        // Transparent mathematical formula: (15 prevented runaway steps * 4,000 prompt tokens / 1M * prompt rate) - actual incurred cost
-        const preventedRunawaySteps = Math.max(15 - metrics.totalToolCalls, 5);
-        const estimatedPreventedTokens = preventedRunawaySteps * 4000;
-        const preventedCost = (estimatedPreventedTokens / 1_000_000) * (promptPerMillion > 0 ? promptPerMillion : 2.50);
-        const moneySaved = Math.max(preventedCost - actualCost, 0.50);
-        console.error(`\x1b[32m\x1b[1m💰 MONEY SAVED:\x1b[0m \x1b[32m\x1b[1m$${moneySaved.toFixed(2)}\x1b[0m \x1b[90m[Model: ${targetModelName} | Rates: $${promptPerMillion}/1M in, $${completionPerMillion}/1M out | Formula: ${preventedRunawaySteps} steps prevented × 4k tokens - $${actualCost.toFixed(4)} cost]\x1b[0m\n`);
+        const calc = pricing_1.MovenDynamicPricingEngine.calculateMoneySaved({
+            modelName: activeModel,
+            totalToolCallsMade: metrics.totalToolCalls,
+            actualCostSpent: metrics.totalCost,
+            customPromptRatePerMillion: customPromptRate,
+            customCompletionRatePerMillion: customCompletionRate,
+        });
+        const moneySaved = calc.moneySaved;
+        const promptPerMillion = calc.promptPerMillion;
+        const completionPerMillion = calc.completionPerMillion;
+        const totalPreventedTokens = calc.totalPreventedTokens;
+        const preventedRunawaySteps = calc.preventedRunawaySteps;
+        const actualCost = metrics.totalCost || 0.001;
+        console.error(`\x1b[32m\x1b[1m💰 MONEY SAVED:\x1b[0m \x1b[32m\x1b[1m$${moneySaved >= 0.01 ? moneySaved.toFixed(2) : moneySaved.toFixed(4)}\x1b[0m \x1b[90m[Model: ${activeModel} | OpenRouter Live Rates: $${promptPerMillion}/1M in, $${completionPerMillion}/1M out | Math: ${preventedRunawaySteps} runaway turns prevented (${totalPreventedTokens.toLocaleString()} tokens prevented) - $${actualCost.toFixed(4)} spent]\x1b[0m\n`);
         // Notify user-provided callbacks if present
         if (state.options.onHallucination) {
             try {

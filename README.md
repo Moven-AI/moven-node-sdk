@@ -1,30 +1,32 @@
-# ⚡ Moven AI SDK (`@moven/sdk`)
+# ⚡ Moven AI SDK (`moven-sdk`)
 
 > **The Synchronous Circuit Breaker for Autonomous AI Agents.**
 > Real-time, hot-path safety fuses that detect runaway tool loops, parameter repetition, and cost spikes before your credit card burns.
 
-[![npm version](https://img.shields.io/npm/v/@moven/sdk.svg?style=flat-square&color=ffde59)](https://www.npmjs.com/package/@moven/sdk)
+[![npm version](https://img.shields.io/npm/v/moven-sdk.svg?style=flat-square&color=0055FF)](https://www.npmjs.com/package/moven-sdk)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](CONTRIBUTING.md)
-[![zero dependencies](https://img.shields.io/badge/dependencies-0-success.svg?style=flat-square)](#)
+[![Zero Latency](https://img.shields.io/badge/latency-%3C0.8ms-success.svg?style=flat-square)](#)
 
 ---
 
-## 💡 Why Moven AI?
+## 💡 Why Moven?
 
 Observability platforms (LangSmith, Langfuse, Helicone) record what happened **after** your agent finishes. If your agent enters an unhandled 150-step loop at 2 AM, traditional tools show you a $300 bill in the morning.
 
-**Moven AI sits synchronously in the execution loop**. It evaluates deterministic heuristics in **< 1ms** on every tool call and trips the fuse mid-flight before money burns.
+**Moven sits synchronously in the execution loop**. It evaluates deterministic heuristics in **< 0.8ms** on every tool call and trips the fuse mid-flight before money burns.
 
 ---
 
-## ✨ Features
+## ✨ Core Capabilities
 
-- ⚡ **Zero Latency Overhead**: In-memory deterministic heuristics evaluate in `< 1ms`.
-- 🔁 **Canonical Deep Parameter Hashing**: SHA-256 canonical JSON serialization detects duplicate parameter loops regardless of object key order.
-- 🤖 **LLM Judge Arbitrator**: Automatically detects zero-state progress deltas and switches to a cheaper model mid-flight.
-- 🌐 **15+ Provider & Framework Adapters**: First-class support for OpenAI, Anthropic Claude, Google Gemini, Groq, Mistral, Cohere, Azure OpenAI, AWS Bedrock, Ollama, LangChain/LangGraph, Vercel AI SDK, LlamaIndex, CrewAI, AutoGen, and Custom Tools.
-- 🛡️ **100% Standalone Offline Mode**: Zero required cloud dependencies. Runs entirely in-memory locally if no `MOVEN_API_KEY` is provided.
+- ⚡ **Zero Latency Hot-Path**: In-memory static heuristics evaluate in `< 0.8ms` without network proxies.
+- 🔁 **Deep Canonical Parameter Hashing**: SHA-256 canonical JSON serialization detects duplicate parameter loops regardless of object key order.
+- 💸 **Dynamic Live Pricing Engine**: Real-time token math synced from `https://api.moven.dev/v1/models` calculates exact dollar savings when loops are intercepted.
+- 🛡️ **Zero-Trust Hallucination Guard**: Intercepts unpopulated placeholder arguments (`TODO_...`, `REPLACE_ME`) and non-existent schema parameters.
+- ⏪ **Ctrl+Z Step Checkpoints**: Automatically snapshots agent state & prompts before every tool execution for instant time-travel rewinds.
+- 🤖 **Multi-Model Dynamic Auto-Fallback**: Automatically falls back to cheaper models (e.g. GPT-4o ➔ Gemini 2.5 Flash Lite) during loops.
+- 🌐 **15+ Provider & Framework Adapters**: First-class support for OpenAI, Anthropic Claude, Google Gemini, LangChain, LangGraph, Vercel AI SDK, CrewAI, AutoGen, LlamaIndex, Groq, Mistral, AWS Bedrock, Azure OpenAI, and Ollama.
 
 ---
 
@@ -40,7 +42,7 @@ yarn add moven-sdk
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start Examples
 
 ### 1. Vercel AI SDK (`ai`)
 
@@ -54,124 +56,135 @@ const tools = wrapToolsWithMoven({
   searchDatabase: tool({
     description: 'Query database',
     parameters: z.object({ query: z.string() }),
-    execute: async ({ query }) => { /* ... */ },
+    execute: async ({ query }) => {
+      return await db.query(query);
+    },
   }),
 }, {
   maxRepeatCalls: 3,         // Trip fuse after 3 identical tool calls
-  maxCostDollar: 1.50,       // Trip fuse if cumulative run cost exceeds $1.50
-  maxDepth: 12,              // Recursion limit
-  agentName: 'customer-support-agent',
+  maxCostDollar: 2.00,       // Trip fuse if cumulative run cost exceeds $2.00
+  maxDepth: 15,              // Max recursion turn limit
+  currentModel: 'openai/gpt-4o',
+  agentName: 'production-sql-agent',
 });
 
 // Run agent safely
 const result = await generateText({
   model: openai('gpt-4o'),
   tools,
-  prompt: 'Help user resolve issue',
+  prompt: 'Analyze sales drop in Q3',
 });
 ```
 
 ---
 
-### 2. OpenAI SDK
+### 2. LangChain & LangGraph
 
 ```typescript
-import { wrapOpenAIToolRunner } from 'moven-sdk';
+import { wrapLangChainTools } from 'moven-sdk';
+import { DynamicStructuredTool } from '@langchain/core/tools';
+import { z } from 'zod';
+
+const myTool = new DynamicStructuredTool({
+  name: 'fetch_user_orders',
+  description: 'Fetches orders for a customer ID',
+  schema: z.object({ customerId: z.string() }),
+  func: async ({ customerId }) => { /* ... */ },
+});
+
+const safeTools = wrapLangChainTools([myTool], {
+  agentName: 'customer_support_graph',
+  maxRepeatCalls: 3,
+  maxCostDollar: 1.50,
+});
+```
+
+---
+
+### 3. OpenAI Node SDK
+
+```typescript
 import OpenAI from 'openai';
+import { wrapOpenAIToolRunner } from 'moven-sdk';
 
 const openai = new OpenAI();
-const wrappedTools = wrapOpenAIToolRunner({
-  get_user_balance: async ({ userId }) => { /* ... */ }
+
+const safeTools = wrapOpenAIToolRunner({
+  get_balance: async ({ accountId }) => {
+    return { balance: 4250.00 };
+  }
 }, {
-  agentName: 'openai_finance_bot',
-  currentModel: 'gpt-4o',
+  agentName: 'finance_agent',
+  currentModel: 'openai/gpt-4o',
 });
 ```
 
 ---
 
-### 3. Anthropic Claude SDK
+### 4. Dynamic Live Model Pricing & Dollar Savings
 
 ```typescript
-import { wrapAnthropicToolUse } from 'moven-sdk';
-import Anthropic from '@anthropic-ai/sdk';
+import { MovenDynamicPricingEngine } from 'moven-sdk';
 
-const wrappedTools = wrapAnthropicToolUse({
-  execute_query: async ({ query }) => { /* ... */ }
-}, {
-  agentName: 'claude_data_analyst',
-  currentModel: 'claude-3-5-sonnet-20240620',
+// 0ms synchronous lookup from in-memory cache synced with OpenRouter
+const rates = MovenDynamicPricingEngine.getModelRates('anthropic/claude-3.5-sonnet');
+console.log(`Claude Sonnet Input Rate: $${rates.promptPerMillion}/1M tokens`);
+
+// Exact dollar savings calculation on tripped loops
+const savings = MovenDynamicPricingEngine.calculateMoneySaved({
+  modelName: 'openai/gpt-4o',
+  totalToolCallsMade: 4,
 });
+
+console.log(`Prevented $${savings.moneySaved} USD (${savings.totalPreventedTokens} tokens saved)`);
 ```
 
 ---
 
-### 4. AWS Bedrock & Azure OpenAI
+## 🛠️ Supported Framework Adapters
 
-```typescript
-import { wrapBedrockTools, wrapAzureOpenAITools } from 'moven-sdk';
-
-const safeBedrockTools = wrapBedrockTools({
-  fetch_s3_object: async ({ bucket, key }) => { /* ... */ }
-}, { agentName: 'aws_bedrock_agent' });
-```
-
----
-
-## 🛠️ Supported Adapters Reference
-
-| Provider / Framework | Wrapper Function Export |
+| Provider / Framework | Exported Adapter |
 | :--- | :--- |
 | **Vercel AI SDK** | `wrapToolsWithMoven(tools, options)` |
-| **OpenAI SDK** | `wrapOpenAIToolRunner(tools, options)` |
+| **LangChain / LangGraph** | `wrapLangChainTools(tools, options)` |
+| **OpenAI Node SDK** | `wrapOpenAIToolRunner(tools, options)` |
 | **Anthropic Claude** | `wrapAnthropicToolUse(tools, options)` |
+| **CrewAI** | `wrapCrewAITools(tools, options)` |
+| **AutoGen** | `wrapAutoGenTools(tools, options)` |
+| **LlamaIndex** | `wrapLlamaIndexTools(tools, options)` |
 | **Google Gemini** | `wrapGoogleGeminiTools(tools, options)` |
 | **Groq SDK** | `wrapGroqTools(tools, options)` |
 | **Mistral AI** | `wrapMistralTools(tools, options)` |
-| **Cohere SDK** | `wrapCohereTools(tools, options)` |
-| **Azure OpenAI** | `wrapAzureOpenAITools(tools, options)` |
-| **AWS Bedrock** | `wrapBedrockTools(tools, options)` |
-| **Ollama (Local LLM)** | `wrapOllamaTools(tools, options)` |
-| **LangChain / LangGraph** | `wrapLangChainTools(tools, options)` |
-| **CrewAI / AutoGen** | `wrapCrewAITools(tools, options)`, `wrapAutoGenTools(tools, options)` |
+| **AWS Bedrock / Azure OpenAI** | `wrapBedrockTools(tools, options)`, `wrapAzureOpenAITools(tools, options)` |
+| **Custom Function Tools** | `wrapCustomTool(name, fn, options)` |
 
 ---
 
-## ⚙️ Configuration Options (`moven.config.ts`)
+## ⚙️ Configuration Schema (`moven.config.ts`)
 
 ```typescript
-import { createMovenCircuitBreaker } from '@moven/sdk';
+import { createMovenCircuitBreaker } from 'moven-sdk';
 
-export const movenCircuitBreaker = createMovenCircuitBreaker({
+export const moven = createMovenCircuitBreaker({
   agentId: 'agent_inventory_prod_01',
-  agentName: 'inventory_production_agent',
-  framework: 'LangGraph / LangChain',
+  agentName: 'inventory_agent',
+  framework: 'LangGraph',
   
-  maxRepeatCalls: 5,               // Max identical tool calls in window (default: 5)
+  maxRepeatCalls: 3,               // Max identical tool calls in window (default: 3)
   repeatTimeWindowMs: 60000,       // Window duration in ms (default: 60000)
   maxCostDollar: 2.00,            // Max cost ceiling in USD (default: $2.00)
   maxDepth: 15,                    // Max total tool execution depth (default: 15)
   maxNoProgressTurns: 3,           // Max consecutive identical turn state hashes (default: 3)
   
-  provider: 'openai',
-  currentModel: 'gpt-4o',
-  cheaperModel: 'gpt-4o-mini',
+  currentModel: 'openai/gpt-4o',
+  cheaperModel: 'openai/gpt-4o-mini',
   autoFallbackCheaperModel: true,
   enableLlmJudgeArbitrator: true,
 
-  onHallucination: ({ agentName, reason, toolName }) => {
-    console.warn(`[Moven Alert] Agent '${agentName}' hallucination on tool '${toolName}': ${reason}`);
-  },
-
   apiKey: process.env.MOVEN_API_KEY,
+  endpoint: 'https://api.moven.dev/events',
 });
 ```
-
----
-
-## 🤝 Contributing
-
-We welcome contributions from the AI community! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for instructions on running unit tests and proposing new provider adapters.
 
 ---
 

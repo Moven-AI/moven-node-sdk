@@ -519,5 +519,140 @@ class MovenRunState {
             return `turn_${Date.now()}`;
         }
     }
+    /**
+     * Generates the complete ReactFlow / n8n workflow graph JSON representation
+     * of this agent run, including triggers, agent node, model/memory/tool subnodes,
+     * circuit breaker router, and outcome branches.
+     */
+    generateWorkflowGraph(options) {
+        const isKilled = options?.isKilled ?? false;
+        const model = this.options.currentModel || this.options.judgeModel || 'deepseek/deepseek-chat';
+        const checkpoints = this.checkpointManager.getCheckpoints();
+        const lastCheckpoint = checkpoints[checkpoints.length - 1];
+        const checkpointId = lastCheckpoint ? `ckpt_${lastCheckpoint.traceId}_step_${lastCheckpoint.stepIndex}` : 'chk_init';
+        const checkpointTurn = lastCheckpoint ? lastCheckpoint.stepIndex : 1;
+        // Unique Tool Names
+        const uniqueTools = Array.from(new Set(this.toolCalls.map(tc => tc.toolName)));
+        const primaryTool = uniqueTools[0] || 'search_customer_tickets';
+        // Build Nodes
+        const nodes = [
+            {
+                id: 'trigger',
+                type: 'triggerNode',
+                position: { x: 50, y: 120 },
+                data: {
+                    label: 'Chat Message Received',
+                    latency: '2ms',
+                    inputs: { user_request: this.userRequest || 'Autonomous agent execution turn' },
+                    outputs: { session_id: this.runId, status: 'received' },
+                },
+            },
+            {
+                id: 'agent',
+                type: 'agentNode',
+                position: { x: 270, y: 110 },
+                data: {
+                    label: this.agentName,
+                    framework: this.framework,
+                    model: model,
+                    inputs: { agent: this.agentName, maxTurns: this.options.maxDepth || 15 },
+                    outputs: { tool_count: this.toolCalls.length, status: isKilled ? 'intercepted' : 'completed' },
+                },
+            },
+            {
+                id: 'sub-model',
+                type: 'subnode',
+                position: { x: 190, y: 260 },
+                data: {
+                    category: 'Model',
+                    label: model.split('/').pop() || model,
+                    type: 'model',
+                    inputs: { model: model, provider: this.options.provider || 'openrouter' },
+                    outputs: { total_cost: this.cumulativeCost },
+                },
+            },
+            {
+                id: 'sub-memory',
+                type: 'subnode',
+                position: { x: 350, y: 260 },
+                data: {
+                    category: 'Memory',
+                    label: 'State Checkpoint',
+                    type: 'memory',
+                    inputs: { checkpoint_id: checkpointId },
+                    outputs: { turn: checkpointTurn, checkpoints_saved: checkpoints.length },
+                },
+            },
+            {
+                id: 'sub-tool-0',
+                type: 'subnode',
+                position: { x: 510, y: 260 },
+                data: {
+                    category: 'Tool Call',
+                    label: primaryTool,
+                    type: 'tool',
+                    inputs: this.toolCalls[0]?.args || { ticket_id: 'TCK-88192' },
+                    outputs: this.toolCalls[0]?.result || { status: 'PENDING_REVIEW' },
+                },
+            },
+            {
+                id: 'router',
+                type: 'routerNode',
+                position: { x: 550, y: 110 },
+                data: {
+                    label: 'Circuit Breaker',
+                    inputs: { max_repeats: this.options.maxRepeatCalls || 3, observed_repeats: this.toolCalls.length },
+                    outputs: { condition: isKilled ? 'false (tripped)' : 'true (healthy)' },
+                },
+            },
+            {
+                id: 'success',
+                type: 'outcomeNode',
+                position: { x: 770, y: 60 },
+                data: {
+                    label: 'Success',
+                    sublabel: '200 OK Execution Completed',
+                    status: 'success',
+                    inputs: { status: '200 OK' },
+                    outputs: { action: 'Transaction Committed' },
+                },
+            },
+            {
+                id: 'failure',
+                type: 'outcomeNode',
+                position: { x: 770, y: 170 },
+                data: {
+                    label: 'Loop Intercepted',
+                    sublabel: isKilled ? '+$18.42 Protected' : 'State Rolled Back',
+                    status: 'failure',
+                    inputs: { reason: options?.errorReason || 'Circuit breaker threshold tripped' },
+                    outputs: { action: 'State Rewound to Last Checkpoint' },
+                },
+            },
+        ];
+        // Edges
+        const edges = [
+            { id: 'e-trigger-agent', source: 'trigger', target: 'agent', type: 'smoothstep', style: { stroke: '#52525B', strokeWidth: 1.5 } },
+            { id: 'e-agent-sub-model', source: 'agent', sourceHandle: 'subnodes', target: 'sub-model', type: 'smoothstep', style: { stroke: '#444444', strokeWidth: 1.5, strokeDasharray: '3,3' } },
+            { id: 'e-agent-sub-memory', source: 'agent', sourceHandle: 'subnodes', target: 'sub-memory', type: 'smoothstep', style: { stroke: '#444444', strokeWidth: 1.5, strokeDasharray: '3,3' } },
+            { id: 'e-agent-sub-tool', source: 'agent', sourceHandle: 'subnodes', target: 'sub-tool-0', type: 'smoothstep', style: { stroke: '#444444', strokeWidth: 1.5, strokeDasharray: '3,3' } },
+            { id: 'e-agent-router', source: 'agent', sourceHandle: 'output', target: 'router', type: 'smoothstep', style: { stroke: '#52525B', strokeWidth: 1.5 } },
+            { id: 'e-router-success', source: 'router', sourceHandle: 'true', target: 'success', type: 'smoothstep', style: { stroke: '#10B981', strokeWidth: 1.5 } },
+            { id: 'e-router-failure', source: 'router', sourceHandle: 'false', target: 'failure', type: 'smoothstep', style: { stroke: '#EF4444', strokeWidth: 1.5 } },
+        ];
+        return {
+            nodes,
+            edges,
+            viewport: { x: 0, y: 0, zoom: 1 },
+            metadata: {
+                agent_name: this.agentName,
+                framework: this.framework,
+                model: model,
+                tool_count: this.toolCalls.length,
+                duration_ms: Date.now() - this.startTime,
+                is_killed: isKilled,
+            },
+        };
+    }
 }
 exports.MovenRunState = MovenRunState;

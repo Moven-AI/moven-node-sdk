@@ -33,3 +33,4 @@ export { wrapAzureOpenAITools } from './adapters/azure';
 export { wrapBedrockTools } from './adapters/bedrock';
 export { wrapOllamaTools } from './adapters/ollama';
 export { wrapCustomTool, wrapCustomToolRegistry } from './adapters/custom';
+export declare function defineConfig<T extends Record<string, any>>(config: T): T;

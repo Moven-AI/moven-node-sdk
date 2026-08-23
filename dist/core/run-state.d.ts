@@ -200,4 +200,22 @@ export declare class MovenRunState {
     private hashArguments;
     hashResultState(result: any): string;
     private hashStateTurn;
+    /**
+     * Generates the complete ReactFlow / n8n workflow graph JSON representation
+     * of this agent run, including triggers, agent node, model/memory/tool subnodes,
+     * circuit breaker router, and outcome branches.
+     */
+    generateWorkflowGraph(options?: {
+        isKilled?: boolean;
+        errorReason?: string;
+    }): {
+        nodes: any[];
+        edges: any[];
+        viewport: {
+            x: number;
+            y: number;
+            zoom: number;
+        };
+        metadata: Record<string, any>;
+    };
 }

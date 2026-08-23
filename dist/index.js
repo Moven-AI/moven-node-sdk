@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenDynamicPricingEngine = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
+exports.defineConfig = defineConfig;
 var run_state_1 = require("./core/run-state");
 Object.defineProperty(exports, "MovenRunState", { enumerable: true, get: function () { return run_state_1.MovenRunState; } });
 Object.defineProperty(exports, "DEFAULT_CHEAPER_MODEL_MAP", { enumerable: true, get: function () { return run_state_1.DEFAULT_CHEAPER_MODEL_MAP; } });
@@ -57,3 +58,6 @@ Object.defineProperty(exports, "wrapOllamaTools", { enumerable: true, get: funct
 var custom_1 = require("./adapters/custom");
 Object.defineProperty(exports, "wrapCustomTool", { enumerable: true, get: function () { return custom_1.wrapCustomTool; } });
 Object.defineProperty(exports, "wrapCustomToolRegistry", { enumerable: true, get: function () { return custom_1.wrapCustomToolRegistry; } });
+function defineConfig(config) {
+    return config;
+}

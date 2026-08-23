@@ -98,6 +98,7 @@ class MovenReporter {
         return null;
     }
     async reportKillEvent(error, state) {
+        const workflowGraph = state.generateWorkflowGraph({ isKilled: true, errorReason: error.reason });
         const payload = {
             event: 'kill',
             runId: state.runId,
@@ -111,10 +112,12 @@ class MovenReporter {
             system_prompt: state.systemPrompt || (state.options.metadata?.system_prompt) || (state.options.metadata?.systemPrompt),
             prompts: state.prompts,
             checkpoints: state.checkpointManager.getCheckpoints(),
+            workflow_graph: workflowGraph,
             metadata: {
                 ...(state.options.metadata || {}),
                 user_request: state.userRequest,
                 system_prompt: state.systemPrompt,
+                workflow_graph: workflowGraph,
             },
             heuristic: error.heuristic,
             reason: error.reason,
@@ -150,6 +153,7 @@ class MovenReporter {
      * Reports a completed normal trace execution with full prompt, spans, and checkpoints.
      */
     async reportTrace(state, extra) {
+        const workflowGraph = state.generateWorkflowGraph({ isKilled: false });
         const payload = {
             event: 'tool',
             runId: state.runId,
@@ -164,6 +168,7 @@ class MovenReporter {
             prompts: state.prompts,
             checkpoints: state.checkpointManager.getCheckpoints(),
             toolCalls: state.toolCalls,
+            workflow_graph: workflowGraph,
             metrics: {
                 totalCost: state.cumulativeCost,
                 totalToolCalls: state.toolCalls.length,
@@ -173,6 +178,7 @@ class MovenReporter {
                 ...(state.options.metadata || {}),
                 user_request: state.userRequest,
                 system_prompt: state.systemPrompt,
+                workflow_graph: workflowGraph,
                 ...(extra || {}),
             },
             timestamp: new Date().toISOString(),

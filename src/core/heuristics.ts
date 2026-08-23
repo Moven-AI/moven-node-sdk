@@ -4,6 +4,7 @@ import { MovenOvernightBurnGuard } from './burn-guard';
 import { MovenHallucinationDetector } from './hallucination';
 import { SemanticFingerprintEngine } from './semantic-fingerprint';
 import { MovenAdaptiveLoopEngine } from './adaptive-loop';
+import { MovenPromptInjectionFirewall } from './prompt-firewall';
 
 export interface HeuristicTripResult {
   tripped: boolean;
@@ -43,6 +44,25 @@ export class MovenHeuristicsEngine {
         toolArgs: hallucinationResult.toolArgs,
         metrics: state.getMetrics(),
       };
+    }
+
+    // 0.6. Real-Time Prompt Injection & Jailbreak Firewall Check
+    if (opts.enablePromptInjectionFirewall !== false && state.toolCalls.length > 0) {
+      const lastCall = state.toolCalls[state.toolCalls.length - 1];
+      const inspection = MovenPromptInjectionFirewall.inspect(
+        { args: lastCall.args, reasoning: lastCall.reasoning },
+        opts.promptFirewall || {}
+      );
+      if (inspection.isAttack) {
+        return {
+          tripped: true,
+          heuristic: 'prompt_injection',
+          reason: inspection.reason || `[Prompt Injection Firewall] Malicious attack pattern intercepted (${inspection.attackType})`,
+          toolName: lastCall.toolName,
+          toolArgs: lastCall.args,
+          metrics: state.getMetrics(),
+        };
+      }
     }
 
     // 0.7. Semantic Fingerprint Layer (<1ms, zero-AI, catches smart loops that hash-based

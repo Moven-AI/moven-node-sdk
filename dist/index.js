@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenDynamicPricingEngine = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
+exports.moven = exports.movenGuard = exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenDynamicPricingEngine = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenPromptInjectionFirewall = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
 exports.defineConfig = defineConfig;
 var run_state_1 = require("./core/run-state");
 Object.defineProperty(exports, "MovenRunState", { enumerable: true, get: function () { return run_state_1.MovenRunState; } });
@@ -17,6 +17,8 @@ var heuristics_1 = require("./core/heuristics");
 Object.defineProperty(exports, "MovenHeuristicsEngine", { enumerable: true, get: function () { return heuristics_1.MovenHeuristicsEngine; } });
 var hallucination_1 = require("./core/hallucination");
 Object.defineProperty(exports, "MovenHallucinationDetector", { enumerable: true, get: function () { return hallucination_1.MovenHallucinationDetector; } });
+var prompt_firewall_1 = require("./core/prompt-firewall");
+Object.defineProperty(exports, "MovenPromptInjectionFirewall", { enumerable: true, get: function () { return prompt_firewall_1.MovenPromptInjectionFirewall; } });
 var errors_1 = require("./core/errors");
 Object.defineProperty(exports, "MovenKillError", { enumerable: true, get: function () { return errors_1.MovenKillError; } });
 var abort_1 = require("./kill/abort");
@@ -58,6 +60,9 @@ Object.defineProperty(exports, "wrapOllamaTools", { enumerable: true, get: funct
 var custom_1 = require("./adapters/custom");
 Object.defineProperty(exports, "wrapCustomTool", { enumerable: true, get: function () { return custom_1.wrapCustomTool; } });
 Object.defineProperty(exports, "wrapCustomToolRegistry", { enumerable: true, get: function () { return custom_1.wrapCustomToolRegistry; } });
+Object.defineProperty(exports, "movenGuard", { enumerable: true, get: function () { return custom_1.movenGuard; } });
+var init_1 = require("./init");
+Object.defineProperty(exports, "moven", { enumerable: true, get: function () { return init_1.moven; } });
 function defineConfig(config) {
     return config;
 }

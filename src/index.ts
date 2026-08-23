@@ -19,6 +19,9 @@ export type { HeuristicTripResult } from './core/heuristics';
 export { MovenHallucinationDetector } from './core/hallucination';
 export type { HallucinationResult } from './core/hallucination';
 
+export { MovenPromptInjectionFirewall } from './core/prompt-firewall';
+export type { PromptFirewallConfig, PromptFirewallResult } from './core/prompt-firewall';
+
 export { MovenKillError } from './core/errors';
 export type { MovenKillMetrics, MovenHeuristicType } from './core/errors';
 
@@ -42,7 +45,9 @@ export { wrapAnthropicToolUse } from './adapters/anthropic';
 export { wrapAzureOpenAITools } from './adapters/azure';
 export { wrapBedrockTools } from './adapters/bedrock';
 export { wrapOllamaTools } from './adapters/ollama';
-export { wrapCustomTool, wrapCustomToolRegistry } from './adapters/custom';
+export { wrapCustomTool, wrapCustomToolRegistry, movenGuard } from './adapters/custom';
+export { moven } from './init';
+export type { MovenInitConfig } from './init';
 
 export function defineConfig<T extends Record<string, any>>(config: T): T {
   return config;

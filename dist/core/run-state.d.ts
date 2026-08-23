@@ -3,6 +3,7 @@ import { BurnGuardOptions } from './burn-guard';
 import { SemanticCacheOptions } from './semantic-cache';
 import { MovenCheckpointManager } from './checkpoint';
 import { SemanticFingerprintOptions } from './semantic-fingerprint';
+import { PromptFirewallConfig } from './prompt-firewall';
 export interface ToolCallLog {
     toolName: string;
     args: any;
@@ -51,6 +52,8 @@ export interface MovenOptions {
     burnGuard?: BurnGuardOptions;
     semanticCache?: SemanticCacheOptions;
     semanticFingerprint?: SemanticFingerprintOptions;
+    enablePromptInjectionFirewall?: boolean;
+    promptFirewall?: PromptFirewallConfig;
     /** Enable Result-Delta Hashing to distinguish legitimate status polling from stagnant loops (default: true) */
     enableResultDeltaProgression?: boolean;
     /** List of tool names that are whitelisted as safe-to-retry long-running polls (bypasses repeat count, governed by pollingTtlSeconds) */

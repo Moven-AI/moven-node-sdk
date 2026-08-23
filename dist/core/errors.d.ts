@@ -12,7 +12,7 @@ export interface MovenKillMetrics {
     moneySaved?: number;
     preventedTokens?: number;
 }
-export type MovenHeuristicType = 'repeat_tool_call' | 'cost_ceiling' | 'depth_ceiling' | 'no_progress_loop' | 'semantic_loop' | 'high_error_rate' | 'latency_hang' | 'schema_validation_failure' | 'token_burst_limit' | 'global_provider_backoff' | 'llm_judge_arbitrator' | 'ai_hallucination' | 'custom_rule';
+export type MovenHeuristicType = 'repeat_tool_call' | 'cost_ceiling' | 'depth_ceiling' | 'no_progress_loop' | 'semantic_loop' | 'high_error_rate' | 'latency_hang' | 'schema_validation_failure' | 'token_burst_limit' | 'global_provider_backoff' | 'llm_judge_arbitrator' | 'ai_hallucination' | 'prompt_injection' | 'custom_rule';
 export declare class MovenKillError extends Error {
     readonly runId: string;
     readonly heuristic: MovenHeuristicType;

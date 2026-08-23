@@ -5,6 +5,7 @@ const burn_guard_1 = require("./burn-guard");
 const hallucination_1 = require("./hallucination");
 const semantic_fingerprint_1 = require("./semantic-fingerprint");
 const adaptive_loop_1 = require("./adaptive-loop");
+const prompt_firewall_1 = require("./prompt-firewall");
 class MovenHeuristicsEngine {
     static evaluate(state) {
         const opts = state.options;
@@ -32,6 +33,21 @@ class MovenHeuristicsEngine {
                 toolArgs: hallucinationResult.toolArgs,
                 metrics: state.getMetrics(),
             };
+        }
+        // 0.6. Real-Time Prompt Injection & Jailbreak Firewall Check
+        if (opts.enablePromptInjectionFirewall !== false && state.toolCalls.length > 0) {
+            const lastCall = state.toolCalls[state.toolCalls.length - 1];
+            const inspection = prompt_firewall_1.MovenPromptInjectionFirewall.inspect({ args: lastCall.args, reasoning: lastCall.reasoning }, opts.promptFirewall || {});
+            if (inspection.isAttack) {
+                return {
+                    tripped: true,
+                    heuristic: 'prompt_injection',
+                    reason: inspection.reason || `[Prompt Injection Firewall] Malicious attack pattern intercepted (${inspection.attackType})`,
+                    toolName: lastCall.toolName,
+                    toolArgs: lastCall.args,
+                    metrics: state.getMetrics(),
+                };
+            }
         }
         // 0.7. Semantic Fingerprint Layer (<1ms, zero-AI, catches smart loops that hash-based
         //      checks miss: goal-state hash repeat, cosine similarity collapse, entropy stagnation)

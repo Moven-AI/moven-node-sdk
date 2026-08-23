@@ -62,8 +62,8 @@ class MovenKillHandler {
             }
             return { fallbackActivated: false, paused: true };
         }
-        // 3. Auto-fallback: switch to cheaper model on first trip instead of killing
-        if (state.options.autoFallbackCheaperModel && !state.isFallbackActive) {
+        // 3. Auto-fallback: switch to cheaper model on first trip instead of killing (NEVER bypass for security/prompt-injections)
+        if (state.options.autoFallbackCheaperModel && !state.isFallbackActive && tripResult.heuristic !== 'prompt_injection') {
             const cheaperModel = state.switchToCheaperModel();
             console.warn(`\x1b[33m\x1b[1m⚡ [Moven AI] Auto-Fallback Activated:\x1b[0m \x1b[36mRouting agent '${state.agentName}' to cheaper model '${cheaperModel}' instead of terminating run.\x1b[0m`);
             // Report fallback event asynchronously to dashboard and webhooks

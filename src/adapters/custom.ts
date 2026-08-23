@@ -68,3 +68,24 @@ export function wrapCustomToolRegistry<T extends Record<string, (...args: any[])
 
   return wrapped as T;
 }
+
+/**
+ * Developer-Friendly Universal Function Wrapper
+ * Can be called as `movenGuard(fn, options)` or `movenGuard('tool_name', fn, options)`
+ */
+export function movenGuard<T extends (...args: any[]) => Promise<any>>(
+  nameOrFn: string | T,
+  fnOrOptions?: T | MovenOptions,
+  options?: MovenOptions
+): T {
+  if (typeof nameOrFn === 'function') {
+    const fn = nameOrFn;
+    const opts = (fnOrOptions as MovenOptions) || {};
+    const inferredName = fn.name || 'custom_tool';
+    return wrapCustomTool(inferredName, fn, opts);
+  } else {
+    const name = nameOrFn;
+    const fn = fnOrOptions as T;
+    return wrapCustomTool(name, fn, options);
+  }
+}

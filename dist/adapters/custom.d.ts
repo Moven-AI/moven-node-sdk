@@ -14,3 +14,8 @@ export declare function wrapCustomTool<T extends (...args: any[]) => Promise<any
  * Accepts an object map of custom tools or functions and wraps every tool function automatically.
  */
 export declare function wrapCustomToolRegistry<T extends Record<string, (...args: any[]) => Promise<any>>>(tools: T, options?: MovenOptions): T;
+/**
+ * Developer-Friendly Universal Function Wrapper
+ * Can be called as `movenGuard(fn, options)` or `movenGuard('tool_name', fn, options)`
+ */
+export declare function movenGuard<T extends (...args: any[]) => Promise<any>>(nameOrFn: string | T, fnOrOptions?: T | MovenOptions, options?: MovenOptions): T;

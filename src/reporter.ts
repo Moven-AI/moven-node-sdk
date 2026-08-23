@@ -1,5 +1,6 @@
 import { MovenKillError } from './core/errors';
 import { MovenRunState, DEFAULT_CHEAPER_MODEL_MAP } from './core/run-state';
+import { MovenPiiRedactor } from './core/pii';
 
 export interface MovenReporterOptions {
   apiKey?: string;
@@ -7,6 +8,7 @@ export interface MovenReporterOptions {
   maxRetries?: number;
   timeoutMs?: number;
   batchIntervalMs?: number;
+  zeroDataRetention?: boolean;
 }
 
 export class MovenReporter {
@@ -14,6 +16,7 @@ export class MovenReporter {
   private endpoint: string;
   private maxRetries: number;
   private timeoutMs: number;
+  private zeroDataRetention: boolean;
 
   constructor(apiKeyOrOptions?: string | MovenReporterOptions, endpoint?: string) {
     if (typeof apiKeyOrOptions === 'object' && apiKeyOrOptions !== null) {
@@ -21,23 +24,34 @@ export class MovenReporter {
       this.endpoint = apiKeyOrOptions.endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'https://api.moven.dev/events';
       this.maxRetries = apiKeyOrOptions.maxRetries ?? 3;
       this.timeoutMs = apiKeyOrOptions.timeoutMs ?? 5000;
+      this.zeroDataRetention = apiKeyOrOptions.zeroDataRetention ?? false;
     } else {
       this.apiKey = apiKeyOrOptions || (typeof process !== 'undefined' ? process.env.MOVEN_API_KEY : undefined);
       this.endpoint = endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'https://api.moven.dev/events';
       this.maxRetries = 3;
       this.timeoutMs = 5000;
+      this.zeroDataRetention = false;
     }
   }
 
   public async sendPayload(payload: any): Promise<boolean> {
     try {
+      // Enterprise Zero-Trust Client-Side PII Sanitization
+      const sanitized = MovenPiiRedactor.sanitizePayload(payload, {
+        zeroDataRetention: this.zeroDataRetention,
+        maskApiKeys: true,
+        maskCreditCards: true,
+        maskSsns: true,
+        maskIbans: true,
+      });
+
       const res = await this.fetchWithRetry(this.endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(this.apiKey ? { 'x-moven-api-key': this.apiKey } : {}),
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(sanitized),
       });
       return res.ok;
     } catch {

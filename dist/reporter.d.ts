@@ -6,12 +6,14 @@ export interface MovenReporterOptions {
     maxRetries?: number;
     timeoutMs?: number;
     batchIntervalMs?: number;
+    zeroDataRetention?: boolean;
 }
 export declare class MovenReporter {
     private apiKey?;
     private endpoint;
     private maxRetries;
     private timeoutMs;
+    private zeroDataRetention;
     constructor(apiKeyOrOptions?: string | MovenReporterOptions, endpoint?: string);
     sendPayload(payload: any): Promise<boolean>;
     private fetchWithRetry;

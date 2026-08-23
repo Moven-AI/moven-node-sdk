@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.wrapCustomTool = wrapCustomTool;
 exports.wrapCustomToolRegistry = wrapCustomToolRegistry;
+exports.movenGuard = movenGuard;
 const run_state_1 = require("../core/run-state");
 const heuristics_1 = require("../core/heuristics");
 const abort_1 = require("../kill/abort");
@@ -56,4 +57,21 @@ function wrapCustomToolRegistry(tools, options) {
         }
     }
     return wrapped;
+}
+/**
+ * Developer-Friendly Universal Function Wrapper
+ * Can be called as `movenGuard(fn, options)` or `movenGuard('tool_name', fn, options)`
+ */
+function movenGuard(nameOrFn, fnOrOptions, options) {
+    if (typeof nameOrFn === 'function') {
+        const fn = nameOrFn;
+        const opts = fnOrOptions || {};
+        const inferredName = fn.name || 'custom_tool';
+        return wrapCustomTool(inferredName, fn, opts);
+    }
+    else {
+        const name = nameOrFn;
+        const fn = fnOrOptions;
+        return wrapCustomTool(name, fn, options);
+    }
 }

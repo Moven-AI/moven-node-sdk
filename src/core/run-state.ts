@@ -5,6 +5,7 @@ import { SemanticCacheOptions } from './semantic-cache';
 import { MovenCheckpointManager } from './checkpoint';
 import { SemanticFingerprintOptions, SemanticFingerprintEngine } from './semantic-fingerprint';
 import { MovenDynamicPricingEngine } from './pricing';
+import { PromptFirewallConfig } from './prompt-firewall';
 
 export interface ToolCallLog {
   toolName: string;
@@ -55,6 +56,8 @@ export interface MovenOptions {
   burnGuard?: BurnGuardOptions; // Overnight Burn Guard ($2000 loss prevention engine)
   semanticCache?: SemanticCacheOptions; // Semantic caching engine options
   semanticFingerprint?: SemanticFingerprintOptions; // Semantic Fingerprint loop detection layer
+  enablePromptInjectionFirewall?: boolean; // Real-time prompt injection & jailbreak firewall (default: true)
+  promptFirewall?: PromptFirewallConfig; // Advanced firewall sensitivity and custom patterns
 
   // ─── NEW POLICIES: POLLING, IDEMPOTENCY, DRY RUN & ADAPTIVE SAFEGUARDS ───
   /** Enable Result-Delta Hashing to distinguish legitimate status polling from stagnant loops (default: true) */

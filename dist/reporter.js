@@ -2,34 +2,46 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenReporter = void 0;
 const run_state_1 = require("./core/run-state");
+const pii_1 = require("./core/pii");
 class MovenReporter {
     apiKey;
     endpoint;
     maxRetries;
     timeoutMs;
+    zeroDataRetention;
     constructor(apiKeyOrOptions, endpoint) {
         if (typeof apiKeyOrOptions === 'object' && apiKeyOrOptions !== null) {
             this.apiKey = apiKeyOrOptions.apiKey || (typeof process !== 'undefined' ? process.env.MOVEN_API_KEY : undefined);
             this.endpoint = apiKeyOrOptions.endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'https://api.moven.dev/events';
             this.maxRetries = apiKeyOrOptions.maxRetries ?? 3;
             this.timeoutMs = apiKeyOrOptions.timeoutMs ?? 5000;
+            this.zeroDataRetention = apiKeyOrOptions.zeroDataRetention ?? false;
         }
         else {
             this.apiKey = apiKeyOrOptions || (typeof process !== 'undefined' ? process.env.MOVEN_API_KEY : undefined);
             this.endpoint = endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'https://api.moven.dev/events';
             this.maxRetries = 3;
             this.timeoutMs = 5000;
+            this.zeroDataRetention = false;
         }
     }
     async sendPayload(payload) {
         try {
+            // Enterprise Zero-Trust Client-Side PII Sanitization
+            const sanitized = pii_1.MovenPiiRedactor.sanitizePayload(payload, {
+                zeroDataRetention: this.zeroDataRetention,
+                maskApiKeys: true,
+                maskCreditCards: true,
+                maskSsns: true,
+                maskIbans: true,
+            });
             const res = await this.fetchWithRetry(this.endpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     ...(this.apiKey ? { 'x-moven-api-key': this.apiKey } : {}),
                 },
-                body: JSON.stringify(payload),
+                body: JSON.stringify(sanitized),
             });
             return res.ok;
         }

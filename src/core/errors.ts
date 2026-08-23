@@ -26,6 +26,7 @@ export type MovenHeuristicType =
   | 'global_provider_backoff' // Coordinated organization-wide provider degradation backoff
   | 'llm_judge_arbitrator'
   | 'ai_hallucination'
+  | 'prompt_injection'
   | 'custom_rule';
 
 export class MovenKillError extends Error {

@@ -45,6 +45,7 @@ export interface MovenOptions {
   maxNoProgressTurns?: number; // default: 3
   judgeModel?: string; // default: 'google/gemini-2.5-flash-lite'
   provider?: 'openai' | 'anthropic' | 'google' | 'cohere' | 'mistral' | 'groq' | 'openrouter' | string;
+  model?: string; // Primary model ID (e.g. 'deepseek/deepseek-chat', 'openai/gpt-4o')
   modelAuthor?: string; // The model family author (e.g. 'openai' from 'openai/gpt-4o-mini')
   currentModel?: string; // The exact model ID the user's code is running
   cheaperModel?: string; // Explicit cheaper fallback model ID (e.g. 'google/gemini-2.5-flash-lite')
@@ -203,7 +204,7 @@ export class MovenRunState {
     this.version = this.options.version || '1.0.0';
     this.tags = this.options.tags || ['production'];
     this.startTime = Date.now();
-    this.activeModel = this.options.currentModel || 'openai/gpt-4o-mini';
+    this.activeModel = this.options.model || this.options.currentModel || 'openai/gpt-4o-mini';
     
     // Always trigger dynamic live pricing engine refresh
     MovenDynamicPricingEngine.refreshLivePricing();
@@ -694,7 +695,8 @@ export class MovenRunState {
     metadata: Record<string, any>;
   } {
     const isKilled = options?.isKilled ?? false;
-    const model = this.options.currentModel || this.options.judgeModel || 'deepseek/deepseek-chat';
+    const model = this.getModel() || this.options.model || this.options.currentModel || this.options.judgeModel || 'deepseek/deepseek-chat';
+    const provider = this.options.provider || 'openrouter';
     const checkpoints = this.checkpointManager.getCheckpoints();
     const lastCheckpoint = checkpoints[checkpoints.length - 1];
     const checkpointId = lastCheckpoint ? `ckpt_${lastCheckpoint.traceId}_step_${lastCheckpoint.stepIndex}` : 'chk_init';
@@ -725,6 +727,7 @@ export class MovenRunState {
           label: this.agentName,
           framework: this.framework,
           model: model,
+          provider: provider,
           inputs: { agent: this.agentName, maxTurns: this.options.maxDepth || 15 },
           outputs: { tool_count: this.toolCalls.length, status: isKilled ? 'intercepted' : 'completed' },
         },
@@ -737,7 +740,7 @@ export class MovenRunState {
           category: 'Model',
           label: model.split('/').pop() || model,
           type: 'model',
-          inputs: { model: model, provider: this.options.provider || 'openrouter' },
+          inputs: { model: model, provider: provider },
           outputs: { total_cost: this.cumulativeCost },
         },
       },

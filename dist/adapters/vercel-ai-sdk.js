@@ -11,7 +11,8 @@ const reporter_1 = require("../reporter");
  * Intercepts tool execution, updates run-state, checks heuristics, and trips circuit breaker on limit violation.
  */
 function wrapToolsWithMoven(tools, options) {
-    const state = new run_state_1.MovenRunState(options);
+    const optsWithFramework = { framework: options?.framework || 'Vercel AI SDK', ...options };
+    const state = new run_state_1.MovenRunState(optsWithFramework);
     const reporter = new reporter_1.MovenReporter(options?.apiKey, options?.endpoint);
     if (!tools || typeof tools !== 'object') {
         return { tools: {}, state, reporter };

@@ -11,7 +11,8 @@ export function wrapLangChainTools<T extends Record<string, any> | Array<any>>(
   tools: T,
   options?: MovenOptions
 ): T {
-  const state = new MovenRunState(options);
+  const optsWithFramework = { framework: options?.framework || 'LangGraph', ...options };
+  const state = new MovenRunState(optsWithFramework);
   const reporter = new MovenReporter(options?.apiKey, options?.endpoint);
 
   reporter.reportRunStart(state);

@@ -6,7 +6,7 @@ const heuristics_1 = require("../core/heuristics");
 const abort_1 = require("../kill/abort");
 const reporter_1 = require("../reporter");
 function wrapOpenAIToolRunner(toolName, fn, options, sharedState) {
-    const optsWithProvider = { provider: 'openai', ...options };
+    const optsWithProvider = { provider: 'openai', framework: options?.framework || 'OpenAI Assistants', ...options };
     const state = sharedState || new run_state_1.MovenRunState(optsWithProvider);
     const reporter = new reporter_1.MovenReporter(options?.apiKey, options?.endpoint);
     const wrapped = async (...args) => {

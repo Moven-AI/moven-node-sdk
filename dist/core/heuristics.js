@@ -4,6 +4,7 @@ exports.MovenHeuristicsEngine = void 0;
 const burn_guard_1 = require("./burn-guard");
 const hallucination_1 = require("./hallucination");
 const semantic_fingerprint_1 = require("./semantic-fingerprint");
+const adaptive_loop_1 = require("./adaptive-loop");
 class MovenHeuristicsEngine {
     static evaluate(state) {
         const opts = state.options;
@@ -53,19 +54,34 @@ class MovenHeuristicsEngine {
                 state.lastSemanticSimilarity = sfResult.similarityScore;
             }
         }
-        // 1. Repeat Call Detection (with Read vs Write tool separation & Idempotency Key validation)
+        // 1. Advanced Adaptive Loop Engine (Novelty Scoring, Jaccard Divergence, Cycle Oscillation, Discovery Headroom)
+        if (state.toolCalls.length > 0) {
+            const adaptiveResult = adaptive_loop_1.MovenAdaptiveLoopEngine.evaluate(state.toolCalls, opts.maxRepeatCalls ? Math.max(opts.maxRepeatCalls * 3, 15) : 15);
+            if (adaptiveResult.tripped) {
+                const lastCall = state.toolCalls[state.toolCalls.length - 1];
+                return {
+                    tripped: true,
+                    heuristic: 'repeat_tool_call',
+                    reason: adaptiveResult.reason || 'Adaptive Loop Sentinel: loop pattern detected',
+                    toolName: lastCall?.toolName,
+                    toolArgs: lastCall?.args,
+                    metrics: state.getMetrics(),
+                };
+            }
+        }
+        // 1.5. Legacy Repeat Call Fallback (with Read vs Write tool separation & Idempotency Key validation)
         const repeatCount = state.getRecentRepeatCallsCount(opts.repeatTimeWindowMs);
         const lastCall = state.toolCalls[state.toolCalls.length - 1];
         const isReadOnly = lastCall?.isReadOnly || false;
-        // Read-only tools (search, get, fetch) receive 2.5x higher headroom than Write tools
+        // Read-only tools (search, get, fetch) receive 3x higher headroom than Write tools
         const baseRepeatLimit = opts.maxRepeatCalls || 5;
-        const effectiveRepeatLimit = isReadOnly ? Math.round(baseRepeatLimit * 2.5) : baseRepeatLimit;
+        const effectiveRepeatLimit = isReadOnly ? Math.max(baseRepeatLimit * 3, 15) : baseRepeatLimit;
         if (repeatCount >= effectiveRepeatLimit) {
-            const toolType = isReadOnly ? 'Read tool' : 'Write tool';
+            const toolType = isReadOnly ? 'Read/Search tool' : 'Write/Mutate tool';
             return {
                 tripped: true,
                 heuristic: 'repeat_tool_call',
-                reason: `${toolType} '${lastCall?.toolName}' called ${repeatCount} times in last ${opts.repeatTimeWindowMs / 1000}s without result progression (limit: ${effectiveRepeatLimit}).`,
+                reason: `${toolType} '${lastCall?.toolName}' called ${repeatCount} times without query novelty or state progression (limit: ${effectiveRepeatLimit}).`,
                 toolName: lastCall?.toolName,
                 toolArgs: lastCall?.args,
                 metrics: state.getMetrics(),

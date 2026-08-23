@@ -10,7 +10,8 @@ const reporter_1 = require("../reporter");
  * Intercepts tool .invoke() and ._call() executions, updates run state, checks heuristics, and trips circuit breaker on limit violation.
  */
 function wrapLangChainTools(tools, options) {
-    const state = new run_state_1.MovenRunState(options);
+    const optsWithFramework = { framework: options?.framework || 'LangGraph', ...options };
+    const state = new run_state_1.MovenRunState(optsWithFramework);
     const reporter = new reporter_1.MovenReporter(options?.apiKey, options?.endpoint);
     reporter.reportRunStart(state);
     if (Array.isArray(tools)) {

@@ -9,7 +9,7 @@ export function wrapOpenAIToolRunner<T extends (...args: any[]) => Promise<any>>
   options?: MovenOptions,
   sharedState?: MovenRunState
 ): T {
-  const optsWithProvider = { provider: 'openai', ...options };
+  const optsWithProvider = { provider: 'openai', framework: options?.framework || 'OpenAI Assistants', ...options };
   const state = sharedState || new MovenRunState(optsWithProvider);
   const reporter = new MovenReporter(options?.apiKey, options?.endpoint);
 

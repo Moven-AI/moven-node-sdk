@@ -105,7 +105,7 @@ class MovenRunState {
         this.version = this.options.version || '1.0.0';
         this.tags = this.options.tags || ['production'];
         this.startTime = Date.now();
-        this.activeModel = this.options.currentModel || 'openai/gpt-4o-mini';
+        this.activeModel = this.options.model || this.options.currentModel || 'openai/gpt-4o-mini';
         // Always trigger dynamic live pricing engine refresh
         pricing_1.MovenDynamicPricingEngine.refreshLivePricing();
         if (options.metadata?.user_request || options.metadata?.userRequest) {
@@ -526,7 +526,8 @@ class MovenRunState {
      */
     generateWorkflowGraph(options) {
         const isKilled = options?.isKilled ?? false;
-        const model = this.options.currentModel || this.options.judgeModel || 'deepseek/deepseek-chat';
+        const model = this.getModel() || this.options.model || this.options.currentModel || this.options.judgeModel || 'deepseek/deepseek-chat';
+        const provider = this.options.provider || 'openrouter';
         const checkpoints = this.checkpointManager.getCheckpoints();
         const lastCheckpoint = checkpoints[checkpoints.length - 1];
         const checkpointId = lastCheckpoint ? `ckpt_${lastCheckpoint.traceId}_step_${lastCheckpoint.stepIndex}` : 'chk_init';
@@ -555,6 +556,7 @@ class MovenRunState {
                     label: this.agentName,
                     framework: this.framework,
                     model: model,
+                    provider: provider,
                     inputs: { agent: this.agentName, maxTurns: this.options.maxDepth || 15 },
                     outputs: { tool_count: this.toolCalls.length, status: isKilled ? 'intercepted' : 'completed' },
                 },
@@ -567,7 +569,7 @@ class MovenRunState {
                     category: 'Model',
                     label: model.split('/').pop() || model,
                     type: 'model',
-                    inputs: { model: model, provider: this.options.provider || 'openrouter' },
+                    inputs: { model: model, provider: provider },
                     outputs: { total_cost: this.cumulativeCost },
                 },
             },

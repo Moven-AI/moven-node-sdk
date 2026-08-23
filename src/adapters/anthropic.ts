@@ -9,7 +9,7 @@ export function wrapAnthropicToolUse<T extends (...args: any[]) => Promise<any>>
   options?: MovenOptions,
   sharedState?: MovenRunState
 ): T {
-  const optsWithProvider = { provider: 'anthropic', ...options };
+  const optsWithProvider = { provider: 'anthropic', framework: options?.framework || 'Anthropic Claude', ...options };
   const state = sharedState || new MovenRunState(optsWithProvider);
   const reporter = new MovenReporter(options?.apiKey, options?.endpoint);
 

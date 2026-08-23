@@ -41,6 +41,7 @@ export interface MovenOptions {
     maxNoProgressTurns?: number;
     judgeModel?: string;
     provider?: 'openai' | 'anthropic' | 'google' | 'cohere' | 'mistral' | 'groq' | 'openrouter' | string;
+    model?: string;
     modelAuthor?: string;
     currentModel?: string;
     cheaperModel?: string;

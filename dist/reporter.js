@@ -99,12 +99,16 @@ class MovenReporter {
     }
     async reportKillEvent(error, state) {
         const workflowGraph = state.generateWorkflowGraph({ isKilled: true, errorReason: error.reason });
+        const model = state.getModel() || state.options.model || state.options.currentModel || 'deepseek/deepseek-chat';
+        const provider = state.options.provider || 'openrouter';
         const payload = {
             event: 'kill',
             runId: state.runId,
             agentId: state.agentId,
             agentName: state.agentName,
             framework: state.framework,
+            model,
+            provider,
             version: state.version,
             tags: state.tags,
             userId: state.options.userId || state.options.userEmail,
@@ -115,6 +119,8 @@ class MovenReporter {
             workflow_graph: workflowGraph,
             metadata: {
                 ...(state.options.metadata || {}),
+                model,
+                provider,
                 user_request: state.userRequest,
                 system_prompt: state.systemPrompt,
                 workflow_graph: workflowGraph,
@@ -154,12 +160,16 @@ class MovenReporter {
      */
     async reportTrace(state, extra) {
         const workflowGraph = state.generateWorkflowGraph({ isKilled: false });
+        const model = state.getModel() || state.options.model || state.options.currentModel || 'deepseek/deepseek-chat';
+        const provider = state.options.provider || 'openrouter';
         const payload = {
             event: 'tool',
             runId: state.runId,
             agentId: state.agentId,
             agentName: state.agentName,
             framework: state.framework,
+            model,
+            provider,
             version: state.version,
             tags: state.tags,
             userId: state.options.userId || state.options.userEmail,
@@ -176,6 +186,8 @@ class MovenReporter {
             },
             metadata: {
                 ...(state.options.metadata || {}),
+                model,
+                provider,
                 user_request: state.userRequest,
                 system_prompt: state.systemPrompt,
                 workflow_graph: workflowGraph,
@@ -204,12 +216,16 @@ class MovenReporter {
      * always reflects the live SDK settings (thresholds, cheaper model, etc).
      */
     async reportRunStart(state) {
+        const model = state.getModel() || state.options.model || state.options.currentModel || 'deepseek/deepseek-chat';
+        const provider = state.options.provider || 'openrouter';
         const payload = {
             event: 'start',
             runId: state.runId,
             agentId: state.agentId,
             agentName: state.agentName,
             framework: state.framework,
+            model,
+            provider,
             version: state.version,
             tags: state.tags,
             user_request: state.userRequest,
@@ -224,8 +240,8 @@ class MovenReporter {
                 cheaper_model: state.options.cheaperModel || state.getCheaperModel(),
                 auto_fallback_cheaper_model: state.options.autoFallbackCheaperModel ?? true,
                 enable_llm_judge_arbitrator: state.options.enableLlmJudgeArbitrator ?? true,
-                current_model: state.options.currentModel || '',
-                provider: state.options.provider || '',
+                current_model: model,
+                provider,
             },
         };
         // Always try to send, even without API key (for local dev)

@@ -11,7 +11,8 @@ export function wrapToolsWithMoven<T extends Record<string, any>>(
   tools: T,
   options?: MovenOptions
 ): { tools: T; state: MovenRunState; reporter: MovenReporter } {
-  const state = new MovenRunState(options);
+  const optsWithFramework = { framework: options?.framework || 'Vercel AI SDK', ...options };
+  const state = new MovenRunState(optsWithFramework);
   const reporter = new MovenReporter(options?.apiKey, options?.endpoint);
 
   if (!tools || typeof tools !== 'object') {

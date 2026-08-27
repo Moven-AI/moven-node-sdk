@@ -4,6 +4,7 @@ import { SemanticCacheOptions } from './semantic-cache';
 import { MovenCheckpointManager } from './checkpoint';
 import { SemanticFingerprintOptions } from './semantic-fingerprint';
 import { PromptFirewallConfig } from './prompt-firewall';
+import { Layer2Options, MovenLayer2Guard, Layer2DecisionResult } from './layer2';
 export interface ToolCallLog {
     toolName: string;
     args: any;
@@ -30,6 +31,8 @@ export interface MovenOptions {
     agentName?: string;
     userId?: string;
     userEmail?: string;
+    userRequest?: string;
+    goal?: string;
     metadata?: Record<string, any>;
     framework?: string;
     version?: string;
@@ -54,6 +57,7 @@ export interface MovenOptions {
     semanticFingerprint?: SemanticFingerprintOptions;
     enablePromptInjectionFirewall?: boolean;
     promptFirewall?: PromptFirewallConfig;
+    layer2?: Layer2Options;
     /** Enable Result-Delta Hashing to distinguish legitimate status polling from stagnant loops (default: true) */
     enableResultDeltaProgression?: boolean;
     /** List of tool names that are whitelisted as safe-to-retry long-running polls (bypasses repeat count, governed by pollingTtlSeconds) */
@@ -159,6 +163,10 @@ export declare class MovenRunState {
     lastStepTokenCount: number;
     /** Global backoff epoch in ms */
     globalBackoffUntil: number;
+    /** Layer 2: Semantic Guard In-Process Instance */
+    layer2Guard: MovenLayer2Guard;
+    /** Latest Layer 2 decision result */
+    lastLayer2Result?: Layer2DecisionResult;
     constructor(options?: MovenOptions);
     setUserRequest(request: string): void;
     setSystemPrompt(prompt: string): void;

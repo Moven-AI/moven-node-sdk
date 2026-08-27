@@ -8,6 +8,7 @@ const crypto_1 = __importDefault(require("crypto"));
 const checkpoint_1 = require("./checkpoint");
 const semantic_fingerprint_1 = require("./semantic-fingerprint");
 const pricing_1 = require("./pricing");
+const layer2_1 = require("./layer2");
 exports.DEFAULT_CHEAPER_MODEL_MAP = {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-3-haiku-20240307',
@@ -77,6 +78,10 @@ class MovenRunState {
     lastStepTokenCount = 0;
     /** Global backoff epoch in ms */
     globalBackoffUntil = 0;
+    /** Layer 2: Semantic Guard In-Process Instance */
+    layer2Guard;
+    /** Latest Layer 2 decision result */
+    lastLayer2Result;
     constructor(options = {}) {
         this.options = {
             maxRepeatCalls: 5,
@@ -99,17 +104,28 @@ class MovenRunState {
             ...options,
         };
         this.runId = options.runId || `run_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-        this.agentName = this.options.agentName || 'default-agent';
-        this.agentId = this.options.agentId || `agent_${this.agentName.toLowerCase().replace(/[^a-z0-9_]/g, '_')}`;
+        // Strict lowercase kebab-case slug format
+        const rawSlug = (this.options.agentId || this.options.agentName || 'default-agent')
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, '-')
+            .replace(/_/g, '-')
+            .replace(/[^a-z0-9-]/g, '');
+        this.agentId = rawSlug || 'default-agent';
+        this.agentName = this.options.agentName || this.agentId;
         this.framework = this.options.framework || 'Custom Agent Wrapper';
         this.version = this.options.version || '1.0.0';
         this.tags = this.options.tags || ['production'];
         this.startTime = Date.now();
         this.activeModel = this.options.model || this.options.currentModel || 'openai/gpt-4o-mini';
+        // Initialize Layer 2 Semantic Guard
+        this.layer2Guard = new layer2_1.MovenLayer2Guard(this.agentId, this.options.layer2);
         // Always trigger dynamic live pricing engine refresh
         pricing_1.MovenDynamicPricingEngine.refreshLivePricing();
-        if (options.metadata?.user_request || options.metadata?.userRequest) {
-            this.userRequest = options.metadata.user_request || options.metadata.userRequest;
+        const req = options.userRequest || options.goal || options.metadata?.user_request || options.metadata?.userRequest;
+        if (req) {
+            this.userRequest = req;
+            this.layer2Guard.memory.setGoal(this.userRequest);
         }
         if (options.metadata?.system_prompt || options.metadata?.systemPrompt) {
             this.systemPrompt = options.metadata.system_prompt || options.metadata.systemPrompt;
@@ -311,6 +327,10 @@ class MovenRunState {
             this.intentHashes.push(intentHash);
             if (this.intentHashes.length > MAX_WINDOW)
                 this.intentHashes.shift();
+            // Layer 2: Asynchronously extract facts and pre-embed into memory
+            if (this.layer2Guard && this.options.layer2?.enabled !== false) {
+                this.layer2Guard.recordToolResult(log.toolName, log.args || {}, res);
+            }
         }
     }
     recordCallOutcome(success, latencyMs = 0, isSchemaFailure = false) {

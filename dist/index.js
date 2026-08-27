@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.moven = exports.movenGuard = exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenDynamicPricingEngine = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenPromptInjectionFirewall = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
+exports.moven = exports.movenGuard = exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenDynamicPricingEngine = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenPromptInjectionFirewall = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticEmbeddingCache = exports.SemanticCanonicalizer = exports.SemanticPolicyEngine = exports.TinySemanticClassifier = exports.SemanticFeatureEngine = exports.MovenMrlEmbedder = exports.SemanticMemoryManager = exports.MovenLayer2Guard = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
 exports.defineConfig = defineConfig;
 var run_state_1 = require("./core/run-state");
 Object.defineProperty(exports, "MovenRunState", { enumerable: true, get: function () { return run_state_1.MovenRunState; } });
@@ -13,6 +13,16 @@ var semantic_cache_1 = require("./core/semantic-cache");
 Object.defineProperty(exports, "MovenSemanticCacheEngine", { enumerable: true, get: function () { return semantic_cache_1.MovenSemanticCacheEngine; } });
 var semantic_fingerprint_1 = require("./core/semantic-fingerprint");
 Object.defineProperty(exports, "SemanticFingerprintEngine", { enumerable: true, get: function () { return semantic_fingerprint_1.SemanticFingerprintEngine; } });
+// Layer 2: Semantic Guard
+var layer2_1 = require("./core/layer2");
+Object.defineProperty(exports, "MovenLayer2Guard", { enumerable: true, get: function () { return layer2_1.MovenLayer2Guard; } });
+Object.defineProperty(exports, "SemanticMemoryManager", { enumerable: true, get: function () { return layer2_1.SemanticMemoryManager; } });
+Object.defineProperty(exports, "MovenMrlEmbedder", { enumerable: true, get: function () { return layer2_1.MovenMrlEmbedder; } });
+Object.defineProperty(exports, "SemanticFeatureEngine", { enumerable: true, get: function () { return layer2_1.SemanticFeatureEngine; } });
+Object.defineProperty(exports, "TinySemanticClassifier", { enumerable: true, get: function () { return layer2_1.TinySemanticClassifier; } });
+Object.defineProperty(exports, "SemanticPolicyEngine", { enumerable: true, get: function () { return layer2_1.SemanticPolicyEngine; } });
+Object.defineProperty(exports, "SemanticCanonicalizer", { enumerable: true, get: function () { return layer2_1.SemanticCanonicalizer; } });
+Object.defineProperty(exports, "SemanticEmbeddingCache", { enumerable: true, get: function () { return layer2_1.SemanticEmbeddingCache; } });
 var heuristics_1 = require("./core/heuristics");
 Object.defineProperty(exports, "MovenHeuristicsEngine", { enumerable: true, get: function () { return heuristics_1.MovenHeuristicsEngine; } });
 var hallucination_1 = require("./core/hallucination");

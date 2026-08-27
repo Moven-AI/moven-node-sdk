@@ -6,6 +6,7 @@ import { MovenCheckpointManager } from './checkpoint';
 import { SemanticFingerprintOptions, SemanticFingerprintEngine } from './semantic-fingerprint';
 import { MovenDynamicPricingEngine } from './pricing';
 import { PromptFirewallConfig } from './prompt-firewall';
+import { Layer2Options, MovenLayer2Guard, Layer2DecisionResult } from './layer2';
 
 export interface ToolCallLog {
   toolName: string;
@@ -34,6 +35,8 @@ export interface MovenOptions {
   agentName?: string; // Production agent name identifier
   userId?: string; // End-user / person identifier (e.g. 'user_88241', 'srini@company.com')
   userEmail?: string; // Optional user email
+  userRequest?: string; // High-level user goal or prompt driving this run
+  goal?: string; // Alias for userRequest
   metadata?: Record<string, any>; // Arbitrary custom metadata tags
   framework?: string; // Agent framework (e.g. 'LangGraph / LangChain', 'Vercel AI SDK')
   version?: string; // Agent version identifier
@@ -58,6 +61,7 @@ export interface MovenOptions {
   semanticFingerprint?: SemanticFingerprintOptions; // Semantic Fingerprint loop detection layer
   enablePromptInjectionFirewall?: boolean; // Real-time prompt injection & jailbreak firewall (default: true)
   promptFirewall?: PromptFirewallConfig; // Advanced firewall sensitivity and custom patterns
+  layer2?: Layer2Options; // Layer 2: Semantic Guard (In-process hot path classifier)
 
   // ─── NEW POLICIES: POLLING, IDEMPOTENCY, DRY RUN & ADAPTIVE SAFEGUARDS ───
   /** Enable Result-Delta Hashing to distinguish legitimate status polling from stagnant loops (default: true) */
@@ -178,6 +182,10 @@ export class MovenRunState {
   public lastStepTokenCount: number = 0;
   /** Global backoff epoch in ms */
   public globalBackoffUntil: number = 0;
+  /** Layer 2: Semantic Guard In-Process Instance */
+  public layer2Guard: MovenLayer2Guard;
+  /** Latest Layer 2 decision result */
+  public lastLayer2Result?: Layer2DecisionResult;
 
   constructor(options: MovenOptions = {}) {
     this.options = {
@@ -201,19 +209,33 @@ export class MovenRunState {
       ...options,
     };
     this.runId = options.runId || `run_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    this.agentName = this.options.agentName || 'default-agent';
-    this.agentId = this.options.agentId || `agent_${this.agentName.toLowerCase().replace(/[^a-z0-9_]/g, '_')}`;
+    
+    // Strict lowercase kebab-case slug format
+    const rawSlug = (this.options.agentId || this.options.agentName || 'default-agent')
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/_/g, '-')
+      .replace(/[^a-z0-9-]/g, '');
+
+    this.agentId = rawSlug || 'default-agent';
+    this.agentName = this.options.agentName || this.agentId;
     this.framework = this.options.framework || 'Custom Agent Wrapper';
     this.version = this.options.version || '1.0.0';
     this.tags = this.options.tags || ['production'];
     this.startTime = Date.now();
     this.activeModel = this.options.model || this.options.currentModel || 'openai/gpt-4o-mini';
     
+    // Initialize Layer 2 Semantic Guard
+    this.layer2Guard = new MovenLayer2Guard(this.agentId, this.options.layer2);
+
     // Always trigger dynamic live pricing engine refresh
     MovenDynamicPricingEngine.refreshLivePricing();
 
-    if (options.metadata?.user_request || options.metadata?.userRequest) {
-      this.userRequest = options.metadata.user_request || options.metadata.userRequest;
+    const req = options.userRequest || options.goal || options.metadata?.user_request || options.metadata?.userRequest;
+    if (req) {
+      this.userRequest = req;
+      this.layer2Guard.memory.setGoal(this.userRequest);
     }
     if (options.metadata?.system_prompt || options.metadata?.systemPrompt) {
       this.systemPrompt = options.metadata.system_prompt || options.metadata.systemPrompt;
@@ -459,6 +481,11 @@ export class MovenRunState {
       const MAX_WINDOW = 10;
       this.intentHashes.push(intentHash);
       if (this.intentHashes.length > MAX_WINDOW) this.intentHashes.shift();
+
+      // Layer 2: Asynchronously extract facts and pre-embed into memory
+      if (this.layer2Guard && this.options.layer2?.enabled !== false) {
+        this.layer2Guard.recordToolResult(log.toolName, log.args || {}, res);
+      }
     }
   }
 

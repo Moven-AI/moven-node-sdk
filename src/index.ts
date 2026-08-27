@@ -13,6 +13,27 @@ export type { SemanticCacheOptions, CacheHitResult } from './core/semantic-cache
 export { SemanticFingerprintEngine } from './core/semantic-fingerprint';
 export type { SemanticFingerprintOptions, SemanticFingerprintResult } from './core/semantic-fingerprint';
 
+// Layer 2: Semantic Guard
+export {
+  MovenLayer2Guard,
+  SemanticMemoryManager,
+  MovenMrlEmbedder,
+  SemanticFeatureEngine,
+  TinySemanticClassifier,
+  SemanticPolicyEngine,
+  SemanticCanonicalizer,
+  SemanticEmbeddingCache,
+} from './core/layer2';
+export type {
+  Layer2Options,
+  SemanticActionInput,
+  SemanticFeatureVector,
+  Layer2DecisionResult,
+  DecisionType,
+  ModelHeadProbabilities,
+  ToolSemanticPolicy,
+} from './core/layer2';
+
 export { MovenHeuristicsEngine } from './core/heuristics';
 export type { HeuristicTripResult } from './core/heuristics';
 

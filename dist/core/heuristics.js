@@ -70,6 +70,22 @@ class MovenHeuristicsEngine {
                 state.lastSemanticSimilarity = sfResult.similarityScore;
             }
         }
+        // 0.8. Layer 2: Semantic Guard (<0.8ms in-process hot path, tiny multi-head classifier)
+        if (opts.layer2?.enabled !== false && state.toolCalls.length > 0 && state.layer2Guard) {
+            const lastCall = state.toolCalls[state.toolCalls.length - 1];
+            const l2Result = state.layer2Guard.evaluate(lastCall.toolName, lastCall.args, state.userRequest, undefined, undefined, undefined);
+            state.lastLayer2Result = l2Result;
+            if (l2Result.decision === 'BLOCK' || l2Result.decision === 'REPLAN') {
+                return {
+                    tripped: true,
+                    heuristic: l2Result.decision === 'BLOCK' ? 'layer2_block' : 'layer2_replan',
+                    reason: l2Result.reason,
+                    toolName: lastCall.toolName,
+                    toolArgs: lastCall.args,
+                    metrics: state.getMetrics(),
+                };
+            }
+        }
         // 1. Advanced Adaptive Loop Engine (Novelty Scoring, Jaccard Divergence, Cycle Oscillation, Discovery Headroom)
         if (state.toolCalls.length > 0) {
             const adaptiveResult = adaptive_loop_1.MovenAdaptiveLoopEngine.evaluate(state.toolCalls, opts.maxRepeatCalls ? Math.max(opts.maxRepeatCalls * 3, 15) : 15);

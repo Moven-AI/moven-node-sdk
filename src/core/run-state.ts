@@ -23,6 +23,14 @@ export interface ToolCallLog {
   intentHash?: string;
   /** Optional idempotency key passed with write tool */
   idempotencyKey?: string;
+  /** Estimated/actual tokens consumed by this single tool step (including model dispatch) */
+  tokens?: number;
+  /** Prompt tokens attributed to this step */
+  promptTokens?: number;
+  /** Completion tokens attributed to this step */
+  completionTokens?: number;
+  /** Dollar cost attributed to this single step */
+  cost?: number;
   /** True if tool is recognized as safe-to-retry / long-running poll */
   isPollingTool?: boolean;
   /** True if tool is read-only (e.g. get_, fetch_, search_) */
@@ -57,7 +65,9 @@ export interface MovenOptions {
   autoFallbackCheaperModel?: boolean; // default: true
   enableLlmJudgeArbitrator?: boolean; // default: true
   burnGuard?: BurnGuardOptions; // Overnight Burn Guard ($2000 loss prevention engine)
+  enableSemanticCache?: boolean; // Semantic caching engine enabled flag (default: true)
   semanticCache?: SemanticCacheOptions; // Semantic caching engine options
+  enableSemanticFingerprint?: boolean; // Semantic Fingerprint loop detection enabled flag (default: true)
   semanticFingerprint?: SemanticFingerprintOptions; // Semantic Fingerprint loop detection layer
   enablePromptInjectionFirewall?: boolean; // Real-time prompt injection & jailbreak firewall (default: true)
   promptFirewall?: PromptFirewallConfig; // Advanced firewall sensitivity and custom patterns
@@ -293,6 +303,25 @@ export class MovenRunState {
     if (newRules.cheaperModel !== undefined) this.options.cheaperModel = newRules.cheaperModel;
     if (newRules.autoFallbackCheaperModel !== undefined) this.options.autoFallbackCheaperModel = newRules.autoFallbackCheaperModel;
     if (newRules.enableLlmJudgeArbitrator !== undefined) this.options.enableLlmJudgeArbitrator = newRules.enableLlmJudgeArbitrator;
+    if (newRules.enableSemanticCache !== undefined) this.options.enableSemanticCache = newRules.enableSemanticCache;
+    if (newRules.semanticCache !== undefined) this.options.semanticCache = { ...this.options.semanticCache, ...newRules.semanticCache };
+    if (newRules.semanticFingerprint !== undefined) this.options.semanticFingerprint = { ...this.options.semanticFingerprint, ...newRules.semanticFingerprint };
+    if (newRules.maxErrorRatePct !== undefined) this.options.maxErrorRatePct = newRules.maxErrorRatePct;
+    if (newRules.maxSlowCallLatencyMs !== undefined) this.options.maxSlowCallLatencyMs = newRules.maxSlowCallLatencyMs;
+    if (newRules.maxSlowCallRatePct !== undefined) this.options.maxSlowCallRatePct = newRules.maxSlowCallRatePct;
+    if (newRules.maxSchemaValidationFailures !== undefined) this.options.maxSchemaValidationFailures = newRules.maxSchemaValidationFailures;
+    if (newRules.maxTokensPerStep !== undefined) this.options.maxTokensPerStep = newRules.maxTokensPerStep;
+    if (newRules.enableStructuralValidation !== undefined) this.options.enableStructuralValidation = newRules.enableStructuralValidation;
+    if (newRules.enableGlobalBackoff !== undefined) this.options.enableGlobalBackoff = newRules.enableGlobalBackoff;
+    if (newRules.slidingWindowRequests !== undefined) this.options.slidingWindowRequests = newRules.slidingWindowRequests;
+    if (newRules.safeToRetryTools !== undefined) this.options.safeToRetryTools = newRules.safeToRetryTools;
+    if (newRules.pollingTtlSeconds !== undefined) this.options.pollingTtlSeconds = newRules.pollingTtlSeconds;
+    if (newRules.readOnlyTools !== undefined) this.options.readOnlyTools = newRules.readOnlyTools;
+    if (newRules.dryRun !== undefined) this.options.dryRun = newRules.dryRun;
+    if (newRules.pauseOnTrip !== undefined) this.options.pauseOnTrip = newRules.pauseOnTrip;
+    if (newRules.percentileStepBaseline !== undefined) this.options.percentileStepBaseline = newRules.percentileStepBaseline;
+    if (newRules.promptFirewall !== undefined) this.options.promptFirewall = { ...this.options.promptFirewall, ...newRules.promptFirewall };
+    if (newRules.layer2 !== undefined) this.options.layer2 = { ...this.options.layer2, ...newRules.layer2 };
   }
 
   public getCheaperModel(providerOrModel?: string): string {
@@ -377,17 +406,6 @@ export class MovenRunState {
     const idempotencyKey = args?.idempotency_key || args?.idempotencyKey || args?.idempotency_token || args?.client_request_token;
     const isPollingTool = this.isSafeToRetryTool(toolName);
     const isReadOnly = this.isReadOnlyTool(toolName);
-
-    const log: ToolCallLog = {
-      toolName,
-      args,
-      argsHash,
-      timestamp: Date.now(),
-      idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
-      isPollingTool,
-      isReadOnly,
-    };
-    this.toolCalls.push(log);
     this.depth += 1;
 
     // 1. Calculate actual / estimated tokens for this step
@@ -408,6 +426,21 @@ export class MovenRunState {
       customPromptRatePerMillion: this.options.promptCostPerMillion,
       customCompletionRatePerMillion: this.options.completionCostPerMillion,
     });
+
+    const log: ToolCallLog = {
+      toolName,
+      args,
+      argsHash,
+      timestamp: Date.now(),
+      idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+      isPollingTool,
+      isReadOnly,
+      promptTokens,
+      completionTokens,
+      tokens: costData.totalTokens,
+      cost: costData.stepCost,
+    };
+    this.toolCalls.push(log);
 
     this.cumulativePromptTokens += promptTokens;
     this.cumulativeCompletionTokens += completionTokens;

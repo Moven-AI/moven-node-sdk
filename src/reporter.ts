@@ -72,7 +72,17 @@ export class MovenReporter {
         clearTimeout(timeoutId);
         if (res.ok) return res;
         if (res.status >= 400 && res.status < 500) {
-          // Client errors (e.g. 401, 403) should not retry
+          // Client errors (e.g. 401, 403) should not retry but must be visibly surfaced
+          try {
+            const errorClone = res.clone();
+            const errorBody = await errorClone.json();
+            console.error(`\x1b[31m[Moven Telemetry Error HTTP ${res.status}]\x1b[0m: ${errorBody.error || errorBody.message || res.statusText}`);
+            if (errorBody.hint) {
+              console.error(`\x1b[33m[Moven Telemetry Hint]\x1b[0m: ${errorBody.hint}`);
+            }
+          } catch {
+            console.error(`\x1b[31m[Moven Telemetry Error HTTP ${res.status}]\x1b[0m: ${res.statusText}`);
+          }
           return res;
         }
       } catch (err: any) {
@@ -191,6 +201,7 @@ export class MovenReporter {
     const workflowGraph = state.generateWorkflowGraph({ isKilled: false });
     const model = state.getModel() || state.options.model || state.options.currentModel || 'deepseek/deepseek-chat';
     const provider = state.options.provider || 'openrouter';
+    const metrics = state.getMetrics();
 
     const payload = {
       event: 'tool',
@@ -209,10 +220,21 @@ export class MovenReporter {
       checkpoints: state.checkpointManager.getCheckpoints(),
       toolCalls: state.toolCalls,
       workflow_graph: workflowGraph,
+      // Flat top-level fields so the backend can persist tokens & cost on 200 OK runs
+      total_cost: metrics.totalCost,
+      total_tokens: metrics.totalTokens,
+      prompt_tokens: metrics.promptTokens,
+      completion_tokens: metrics.completionTokens,
+      step_count: metrics.totalToolCalls,
+      duration_ms: metrics.durationMs,
       metrics: {
-        totalCost: state.cumulativeCost,
-        totalToolCalls: state.toolCalls.length,
-        durationMs: Date.now() - state.startTime,
+        totalCost: metrics.totalCost,
+        totalToolCalls: metrics.totalToolCalls,
+        promptTokens: metrics.promptTokens,
+        completionTokens: metrics.completionTokens,
+        totalTokens: metrics.totalTokens,
+        durationMs: metrics.durationMs,
+        moneySaved: metrics.moneySaved,
       },
       metadata: {
         ...(state.options.metadata || {}),
@@ -292,15 +314,58 @@ export class MovenReporter {
       if (res.ok) {
         try {
           const data = await res.json();
-          if (data.agentConfig) {
+          const pol = data.policy || data.agentConfig;
+          if (pol) {
             state.updateOptions({
-              maxRepeatCalls: data.agentConfig.max_repeat_calls,
-              maxCostDollar: data.agentConfig.max_cost_dollar,
-              maxDepth: data.agentConfig.max_depth,
-              maxNoProgressTurns: data.agentConfig.max_no_progress_turns,
-              cheaperModel: data.agentConfig.cheaper_model,
-              autoFallbackCheaperModel: data.agentConfig.auto_fallback_cheaper_model,
-              enableLlmJudgeArbitrator: data.agentConfig.enable_llm_judge_arbitrator,
+              maxRepeatCalls: pol.maxRepeatCalls ?? pol.max_repeat_calls,
+              maxCostDollar: pol.maxCostDollar ?? pol.max_cost_dollar,
+              maxDepth: pol.maxDepth ?? pol.max_depth,
+              maxNoProgressTurns: pol.maxNoProgressTurns ?? pol.max_no_progress_turns ?? pol.max_no_progressturns,
+              cheaperModel: pol.cheaperModel ?? pol.cheaper_model,
+              autoFallbackCheaperModel: pol.autoFallbackCheaperModel ?? pol.auto_fallback_cheaper_model,
+              enableLlmJudgeArbitrator: pol.enableLlmJudgeArbitrator ?? pol.enable_llm_judge_arbitrator ?? pol.enable_llm_judge,
+              enableSemanticCache: pol.enableSemanticCache ?? pol.enable_semantic_cache,
+              semanticCache: pol.semanticCache || (pol.semantic_cache_threshold ? {
+                similarityThreshold: pol.semantic_cache_threshold,
+                ttlMs: (pol.semantic_cache_ttl_seconds || 3600) * 1000,
+              } : undefined),
+              semanticFingerprint: pol.semanticFingerprint || (pol.semantic_similarity_threshold ? {
+                similarityThreshold: pol.semantic_similarity_threshold,
+              } : undefined),
+              maxErrorRatePct: pol.maxErrorRatePct ?? pol.max_error_rate_pct,
+              maxSlowCallLatencyMs: pol.maxSlowCallLatencyMs ?? pol.max_slow_call_latency_ms,
+              maxSlowCallRatePct: pol.maxSlowCallRatePct ?? pol.max_slow_call_rate_pct,
+              maxSchemaValidationFailures: pol.maxSchemaValidationFailures ?? pol.max_schema_validation_failures,
+              maxTokensPerStep: pol.maxTokensPerStep ?? pol.max_tokens_per_step,
+              enableStructuralValidation: pol.enableStructuralValidation ?? pol.enable_structural_validation,
+              enableGlobalBackoff: pol.enableGlobalBackoff ?? pol.enable_global_backoff,
+              slidingWindowRequests: pol.slidingWindowRequests ?? pol.sliding_window_requests,
+              safeToRetryTools: pol.safeToRetryTools ?? pol.safe_to_retry_tools,
+              pollingTtlSeconds: pol.pollingTtlSeconds ?? pol.polling_ttl_seconds,
+              readOnlyTools: pol.readOnlyTools ?? pol.read_only_tools,
+              dryRun: pol.dryRun ?? pol.dry_run,
+              pauseOnTrip: pol.pauseOnTrip ?? pol.pause_on_trip,
+              promptFirewall: pol.promptFirewall || (pol.firewall_enabled !== undefined ? {
+                enabled: pol.firewall_enabled,
+                sensitivity: pol.firewall_sensitivity || 'HIGH',
+                blockDirectInjections: pol.block_direct_injections,
+                blockSystemPromptLeaks: pol.block_system_prompt_leaks,
+                blockJailbreaks: pol.block_jailbreaks,
+                customBlockedPhrases: pol.custom_blocked_phrases,
+              } : undefined),
+              layer2: pol.layer2 || (pol.layer2_enabled !== undefined ? {
+                enabled: pol.layer2_enabled,
+                mode: pol.layer2_mode,
+                redundancyThreshold: pol.layer2_redundancy_threshold,
+                driftThreshold: pol.layer2_drift_threshold,
+                noveltyThreshold: pol.layer2_novelty_threshold,
+                usefulThreshold: pol.layer2_useful_threshold,
+                hysteresisEnabled: pol.layer2_hysteresis_enabled,
+                blockThreshold: pol.layer2_block_threshold,
+                recoverThreshold: pol.layer2_recover_threshold,
+                actionMemoryWindow: pol.layer2_action_memory_window,
+                factMemoryWindow: pol.layer2_fact_memory_window,
+              } : undefined),
             });
           }
           if (data.globalCheaperModelMap) {

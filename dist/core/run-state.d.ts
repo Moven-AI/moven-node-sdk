@@ -20,6 +20,14 @@ export interface ToolCallLog {
     intentHash?: string;
     /** Optional idempotency key passed with write tool */
     idempotencyKey?: string;
+    /** Estimated/actual tokens consumed by this single tool step (including model dispatch) */
+    tokens?: number;
+    /** Prompt tokens attributed to this step */
+    promptTokens?: number;
+    /** Completion tokens attributed to this step */
+    completionTokens?: number;
+    /** Dollar cost attributed to this single step */
+    cost?: number;
     /** True if tool is recognized as safe-to-retry / long-running poll */
     isPollingTool?: boolean;
     /** True if tool is read-only (e.g. get_, fetch_, search_) */
@@ -53,7 +61,9 @@ export interface MovenOptions {
     autoFallbackCheaperModel?: boolean;
     enableLlmJudgeArbitrator?: boolean;
     burnGuard?: BurnGuardOptions;
+    enableSemanticCache?: boolean;
     semanticCache?: SemanticCacheOptions;
+    enableSemanticFingerprint?: boolean;
     semanticFingerprint?: SemanticFingerprintOptions;
     enablePromptInjectionFirewall?: boolean;
     promptFirewall?: PromptFirewallConfig;

@@ -1,12 +1,15 @@
 import crypto from 'crypto';
-import { MovenKillMetrics } from './errors';
+import { MovenKillError, MovenKillMetrics } from './errors';
+import { safeStringify, stableHashInput } from './safe-json';
 import { BurnGuardOptions } from './burn-guard';
 import { SemanticCacheOptions } from './semantic-cache';
-import { MovenCheckpointManager } from './checkpoint';
+import { MovenCheckpointManager, MovenCompensationRegistry, CompensationInput } from './checkpoint';
 import { SemanticFingerprintOptions, SemanticFingerprintEngine } from './semantic-fingerprint';
 import { MovenDynamicPricingEngine } from './pricing';
 import { PromptFirewallConfig } from './prompt-firewall';
 import { Layer2Options, MovenLayer2Guard, Layer2DecisionResult } from './layer2';
+
+export type ToolCallStatus = 'queued' | 'in_flight' | 'committed' | 'cancelled';
 
 export interface ToolCallLog {
   toolName: string;
@@ -21,8 +24,18 @@ export interface ToolCallLog {
   reasoning?: string;
   /** Goal-state hash of (reasoning intent + tool result) — set after recordToolResult */
   intentHash?: string;
-  /** Optional idempotency key passed with write tool */
+  /**
+   * Idempotency key. Auto-generated per unique call and injected into args so
+   * downstream APIs (Stripe, DBs) can dedupe — prevents double-fire when a
+   * call is retried after a rewind.
+   */
   idempotencyKey?: string;
+  /** Lifecycle: queued → in_flight → committed | cancelled */
+  status: ToolCallStatus;
+  /** Convenience flag: true only when the call reached the downstream API and returned */
+  committed?: boolean;
+  /** Depth/step of this call (matches the checkpoint created just before it) */
+  depth?: number;
   /** Estimated/actual tokens consumed by this single tool step (including model dispatch) */
   tokens?: number;
   /** Prompt tokens attributed to this step */
@@ -109,6 +122,20 @@ export interface MovenOptions {
 
   /** Tool names that should be gated by the async LLM Judge before execution (e.g. 'sendEmail', 'writeToDb') */
   highRiskTools?: string[];
+  /** Bounded checkpoint retention window (default 50 turns) */
+  maxCheckpoints?: number;
+  /**
+   * Compensating actions (saga pattern) registered at construction:
+   * { create_row: (args, result) => db.delete_row(result.id) } or
+   * { 'stripe.charge': { type: 'api_call', name: 'stripe.refund_charge', config: {...} } }
+   */
+  compensations?: Record<string, CompensationInput>;
+  /** Auto-inject generated idempotency keys into tool args (default: true) */
+  autoInjectIdempotencyKey?: boolean;
+  /** Default cooldown applied to the offending tool after a rewind (default 300s) */
+  rewindCooldownSeconds?: number;
+  /** Per-tool inline compensating action for adapter wrappers: movenGuard('create_row', fn, { compensate: (args, result) => db.delete_row(result.id) }) */
+  compensate?: CompensationInput;
   promptCostPerMillion?: number;
   completionCostPerMillion?: number;
   apiKey?: string;
@@ -116,6 +143,7 @@ export interface MovenOptions {
   onKill?: (error: any) => void;
   onPause?: (info: { agentName: string; reason: string; toolName?: string; args?: any; resumeToken: string }) => void;
   onHallucination?: (info: { agentName: string; reason: string; toolName?: string; args?: any }) => void;
+  onRewind?: (receipt: any) => void;
   customCheck?: (state: MovenRunState) => { tripped: boolean; reason: string } | null;
 }
 
@@ -147,6 +175,19 @@ export const DEFAULT_CHEAPER_MODEL_MAP: Record<string, string> = {
   'claude-3-opus-20240229': 'claude-3-haiku-20240307',
   'gemini-1.5-pro': 'gemini-2.5-flash-lite',
   'gemini-2.0-flash': 'gemini-2.5-flash-lite',
+  // Enterprise direct providers
+  'x-ai': 'grok-3-fast',
+  xai: 'grok-3-fast',
+  perplexity: 'sonar',
+  deepseek: 'deepseek-chat',
+  moonshot: 'moonshot-v1-8k',
+  qwen: 'qwen-turbo',
+  dashscope: 'qwen-turbo',
+  zhipu: 'glm-4-flash',
+  yi: 'yi-lightning',
+  huggingface: 'Qwen/Qwen2.5-7B-Instruct',
+  nvidia: 'meta/llama-3.1-8b-instruct',
+  '01-ai': 'yi-lightning',
 };
 
 export class MovenRunState {
@@ -197,6 +238,28 @@ export class MovenRunState {
   /** Latest Layer 2 decision result */
   public lastLayer2Result?: Layer2DecisionResult;
 
+  // ─── IN-PROCESS ORCHESTRATION STATE (rewindable — Mechanism 1) ───────────
+  /** Agent context / plan. Deep-copied into every checkpoint; restored on rewind. */
+  public context: Record<string, any> = {};
+  /** Working scratchpad (intermediate values, partial results). Checkpointed + restored. */
+  public scratchpad: Record<string, any> = {};
+  /** Per-tool retry counters. Checkpointed + restored on rewind. */
+  public retryCounts: Record<string, number> = {};
+
+  // ─── HALT GATE + TOOL COOLDOWNS (post-rewind safety) ─────────────────────
+  /** After a rewind the agent is halted — a human decision or re-plan is required. */
+  public halted: boolean = false;
+  public haltReason?: string;
+  /** Set when the operator forces a re-plan step instead of a blind resume. */
+  public replanRequested: boolean = false;
+  /** toolName (or toolName:argsHash) → cooldown expiry epoch ms */
+  public toolCooldowns: Map<string, number> = new Map();
+
+  /** Compensating-action registry (saga) — used by the rewind engine */
+  public readonly compensations = new MovenCompensationRegistry();
+  /** Ctrl+Z checkpoint ledger (bounded retention) */
+  public checkpointManager: MovenCheckpointManager;
+
   constructor(options: MovenOptions = {}) {
     this.options = {
       maxRepeatCalls: 5,
@@ -238,6 +301,14 @@ export class MovenRunState {
     
     // Initialize Layer 2 Semantic Guard
     this.layer2Guard = new MovenLayer2Guard(this.agentId, this.options.layer2);
+
+    // Bounded checkpoint ledger + compensation registry (saga pattern)
+    this.checkpointManager = new MovenCheckpointManager(this.options.maxCheckpoints ?? 50);
+    if (options.compensations) {
+      for (const [toolName, comp] of Object.entries(options.compensations)) {
+        this.compensations.register(toolName, comp);
+      }
+    }
 
     // Always trigger dynamic live pricing engine refresh
     MovenDynamicPricingEngine.refreshLivePricing();
@@ -384,8 +455,6 @@ export class MovenRunState {
     return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
   }
 
-  public readonly checkpointManager = new MovenCheckpointManager();
-
   public isSafeToRetryTool(toolName: string): boolean {
     const list = this.options.safeToRetryTools || [
       'check_build_status', 'poll_task', 'get_job_status', 'wait_for_lock', 
@@ -401,9 +470,65 @@ export class MovenRunState {
     return customList.includes(toolName) || defaultReadOnlyPrefixes.some(prefix => lower.startsWith(prefix));
   }
 
+  /**
+   * The interception point. Called BEFORE the real tool body runs — checks
+   * the halt gate and cooldowns synchronously so a blocked call can never
+   * reach the network (zero-proxy, in-process interception).
+   * Throws MovenKillError when the call must not execute.
+   */
+  private interceptionGuard(toolName: string, argsHash: string): void {
+    if (this.isKilled) {
+      throw new MovenKillError({
+        runId: this.runId,
+        heuristic: 'repeat_tool_call',
+        reason: 'Execution blocked: circuit breaker already tripped for this run.',
+        toolName,
+        metrics: this.getMetrics(),
+      });
+    }
+    if (this.halted) {
+      throw new MovenKillError({
+        runId: this.runId,
+        heuristic: 'repeat_tool_call',
+        reason: `Execution blocked: agent is HALTED after a rewind. ${this.haltReason || 'A human decision or re-plan is required before resume.'}`,
+        toolName,
+        metrics: this.getMetrics(),
+      });
+    }
+    if (this.isToolOnCooldown(toolName, argsHash)) {
+      const remaining = Math.ceil(this.cooldownRemainingMs(toolName) / 1000);
+      throw new MovenKillError({
+        runId: this.runId,
+        heuristic: 'repeat_tool_call',
+        reason: `Execution blocked: tool '${toolName}' is on post-rewind cooldown (${remaining}s remaining). It cannot retrigger the identical loop until the cooldown expires or an operator clears it.`,
+        toolName,
+        metrics: this.getMetrics(),
+      });
+    }
+  }
+
   public recordToolCall(toolName: string, args: any): ToolCallLog {
     const argsHash = this.hashArguments(toolName, args);
-    const idempotencyKey = args?.idempotency_key || args?.idempotencyKey || args?.idempotency_token || args?.client_request_token;
+
+    // In-process interception BEFORE anything can leave the process
+    this.interceptionGuard(toolName, argsHash);
+
+    // Saga: idempotency key — generate if absent and inject into args so the
+    // downstream API can dedupe a post-rewind retry of the same logical call.
+    const autoInject = this.options.autoInjectIdempotencyKey !== false;
+    let idempotencyKey = args?.idempotency_key || args?.idempotencyKey || args?.idempotency_token || args?.client_request_token;
+    if (!idempotencyKey && autoInject) {
+      idempotencyKey = `mvn_${this.runId}_${toolName}_${this.depth + 1}_${argsHash}`.substring(0, 72);
+      if (args && typeof args === 'object' && !Array.isArray(args) && !Object.isFrozen(args)) {
+        try {
+          args.idempotency_key = idempotencyKey;
+        } catch {
+          /* frozen/sealed args — key still recorded on the log */
+        }
+      }
+    }
+    idempotencyKey = typeof idempotencyKey === 'string' ? idempotencyKey : undefined;
+
     const isPollingTool = this.isSafeToRetryTool(toolName);
     const isReadOnly = this.isReadOnlyTool(toolName);
     this.depth += 1;
@@ -432,7 +557,9 @@ export class MovenRunState {
       args,
       argsHash,
       timestamp: Date.now(),
-      idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+      idempotencyKey,
+      status: 'in_flight',
+      depth: this.depth,
       isPollingTool,
       isReadOnly,
       promptTokens,
@@ -447,7 +574,11 @@ export class MovenRunState {
     this.cumulativeTotalTokens += costData.totalTokens;
     this.cumulativeCost += costData.stepCost;
 
-    // Snapshot Ctrl+Z step checkpoint with prompt & state context
+    // Snapshot Ctrl+Z step checkpoint — immutable deep copy of the FULL
+    // in-process orchestration state (context, scratchpad, retry counters,
+    // conversation history) taken BEFORE this call can touch the outside world.
+    // NOTE: created with stepIndex === this.depth === log.depth — the checkpoint
+    // captures the state immediately BEFORE the call at the same depth executes.
     this.checkpointManager.createCheckpoint(
       this.runId,
       this.agentId,
@@ -455,15 +586,55 @@ export class MovenRunState {
       toolName,
       args,
       this.cumulativeCost,
-      undefined,
+      this.prompts.slice(-50),
       { toolArgs: args, reasoning: this.reasoningSteps[this.reasoningSteps.length - 1] },
       this.systemPrompt,
       this.userRequest || (typeof args?.prompt === 'string' ? args.prompt : undefined),
       this.activeModel,
-      `Step ${this.depth}: ${toolName}`
+      `Step ${this.depth}: ${toolName}`,
+      {
+        context: this.context,
+        scratchpad: this.scratchpad,
+        retryCounts: this.retryCounts,
+        turnNumber: this.depth,
+      }
     );
 
     return log;
+  }
+
+  /** Registers a call as queued (scheduled but not started). Not checkpointed, not costed. */
+  public queueToolCall(toolName: string, args: any): ToolCallLog {
+    const argsHash = this.hashArguments(toolName, args);
+    const log: ToolCallLog = {
+      toolName,
+      args,
+      argsHash,
+      timestamp: Date.now(),
+      status: 'queued',
+      depth: this.depth + 1,
+      isPollingTool: this.isSafeToRetryTool(toolName),
+      isReadOnly: this.isReadOnlyTool(toolName),
+    };
+    this.toolCalls.push(log);
+    return log;
+  }
+
+  /** All calls that have been dispatched but have not committed (or been cancelled). */
+  public pendingCalls(): ToolCallLog[] {
+    return this.toolCalls.filter(c => c.status === 'queued' || c.status === 'in_flight');
+  }
+
+  /** Cancels every queued / in-flight call. Returns the cancelled logs. */
+  public cancelPending(): ToolCallLog[] {
+    const cancelled: ToolCallLog[] = [];
+    for (const c of this.toolCalls) {
+      if (c.status === 'queued' || c.status === 'in_flight') {
+        c.status = 'cancelled';
+        cancelled.push(c);
+      }
+    }
+    return cancelled;
   }
 
   public recordToolResult(logOrResult: ToolCallLog | any, result?: any, durationMs?: number) {
@@ -481,6 +652,9 @@ export class MovenRunState {
     if (log) {
       log.result = res;
       log.durationMs = durationMs || (Date.now() - log.timestamp);
+      // The call reached the downstream API and returned — it is committed.
+      log.status = 'committed';
+      log.committed = true;
 
       // Compute and attach Result-Delta Hash (status / payload progression)
       const resultHash = this.hashResultState(res);
@@ -522,8 +696,111 @@ export class MovenRunState {
     }
   }
 
-  public recordCallOutcome(success: boolean, latencyMs: number = 0, isSchemaFailure: boolean = false): void {
-    const MAX_WINDOW = this.options.slidingWindowRequests || 20;
+  // ─── ORCHESTRATION STATE MUTATORS (all rewindable) ──────────────────────
+  public updateContext(patch: Record<string, any>): void {
+    this.context = { ...this.context, ...patch };
+  }
+
+  public updateScratchpad(patch: Record<string, any>): void {
+    this.scratchpad = { ...this.scratchpad, ...patch };
+  }
+
+  public incrementRetry(toolName: string): number {
+    this.retryCounts[toolName] = (this.retryCounts[toolName] || 0) + 1;
+    return this.retryCounts[toolName];
+  }
+
+  /** Register a compensating action (saga inverse) for a tool. */
+  public registerCompensation(toolName: string, input: CompensationInput): void {
+    this.compensations.register(toolName, input);
+  }
+
+  // ─── HALT GATE + COOLDOWNS ───────────────────────────────────────────────
+  /**
+   * Puts a tool on cooldown. Returns the cooldown expiry (epoch ms).
+   * With argsHash the cooldown targets the identical call; without it the
+   * whole tool is blocked — safer for incident response.
+   */
+  public applyCooldown(toolName: string | undefined, seconds: number = this.options.rewindCooldownSeconds ?? 300, argsHash?: string): number {
+    if (!toolName) return 0;
+    const until = Date.now() + seconds * 1000;
+    this.toolCooldowns.set(argsHash ? `${toolName}:${argsHash}` : toolName, until);
+    return until;
+  }
+
+  public isToolOnCooldown(toolName: string, argsHash?: string): boolean {
+    const now = Date.now();
+    const exact = argsHash ? this.toolCooldowns.get(`${toolName}:${argsHash}`) : undefined;
+    const toolWide = this.toolCooldowns.get(toolName);
+    if (exact !== undefined && exact > now) return true;
+    if (toolWide !== undefined && toolWide > now) return true;
+    return false;
+  }
+
+  public cooldownRemainingMs(toolName?: string): number {
+    const now = Date.now();
+    let max = 0;
+    for (const [key, until] of this.toolCooldowns.entries()) {
+      if (until <= now) {
+        this.toolCooldowns.delete(key);
+        continue;
+      }
+      if (!toolName || key === toolName || key.startsWith(`${toolName}:`)) {
+        max = Math.max(max, until - now);
+      }
+    }
+    return max;
+  }
+
+  public clearCooldowns(): void {
+    this.toolCooldowns.clear();
+  }
+
+  /**
+   * Mechanism 1 rewind: pointer restoration of in-process orchestration state.
+   * External side effects are NOT touched here — the rewind engine handles
+   * sagas/manual-review for committed calls before invoking this.
+   * Returns the number of truncated (forgotten) tool-call log entries.
+   */
+  public restoreFromCheckpoint(ckpt: {
+    context?: Record<string, any>;
+    scratchpad?: Record<string, any>;
+    retryCounts?: Record<string, number>;
+    messagesSnapshot?: any[];
+    model?: string;
+    cumulativeCost: number;
+    stepIndex: number;
+    timestamp: number;
+  }): number {
+    this.context = ckpt.context ? { ...ckpt.context } : {};
+    this.scratchpad = ckpt.scratchpad ? { ...ckpt.scratchpad } : {};
+    this.retryCounts = ckpt.retryCounts ? { ...ckpt.retryCounts } : {};
+    if (ckpt.messagesSnapshot) {
+      this.prompts = ckpt.messagesSnapshot.map(p => ({ ...p }));
+    }
+    if (ckpt.model) this.activeModel = ckpt.model;
+    this.cumulativeCost = ckpt.cumulativeCost || 0;
+    this.depth = ckpt.stepIndex - 1 < 0 ? 0 : ckpt.stepIndex - 1;
+
+    // Keep only calls strictly BEFORE the checkpoint's step (checkpoint S is
+    // captured before call S runs, so call S and everything after is undone).
+    const keepCount = this.toolCalls.filter(
+      c => (c.depth !== undefined ? c.depth < ckpt.stepIndex : c.timestamp <= ckpt.timestamp)
+    ).length;
+    const truncated = this.toolCalls.length - keepCount;
+    this.toolCalls = this.toolCalls.slice(0, keepCount);
+
+    // Reset inference-window state to post-restore baseline
+    this.stateHashes = [];
+    this.intentHashes = [];
+    this.reasoningSteps = [];
+    this.consecutiveSchemaFailures = 0;
+    this.lastLayer2Result = undefined;
+    this.replanRequested = false;
+    return truncated;
+  }
+
+  public recordCallOutcome(success: boolean, latencyMs: number = 0, isSchemaFailure: boolean = false): void {    const MAX_WINDOW = this.options.slidingWindowRequests || 20;
     this.recentCallOutcomes.push({ timestamp: Date.now(), success, latencyMs, isSchemaFailure });
     if (this.recentCallOutcomes.length > MAX_WINDOW) this.recentCallOutcomes.shift();
 
@@ -696,7 +973,8 @@ export class MovenRunState {
 
   private canonicalStringify(obj: any): string {
     if (obj === null || typeof obj !== 'object') {
-      return JSON.stringify(obj);
+      // BigInt/functions/circular leaves must not throw the hot path
+      return safeStringify(obj);
     }
     if (Array.isArray(obj)) {
       return '[' + obj.map(item => this.canonicalStringify(item)).join(',') + ']';
@@ -711,7 +989,10 @@ export class MovenRunState {
       const canonical = this.canonicalStringify({ toolName, args: args || {} });
       return crypto.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
     } catch {
-      return `${toolName}_${Date.now()}`;
+      // DETERMINISTIC fallback — a unique-per-call value here would silently
+      // disable repeat detection and make idempotency keys retry-unique.
+      const canonical = stableHashInput({ toolName, args: args || {} });
+      return crypto.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
     }
   }
 
@@ -733,7 +1014,9 @@ export class MovenRunState {
       const canonical = this.canonicalStringify(statePayload);
       return crypto.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
     } catch {
-      return `res_${Date.now()}`;
+      // Deterministic fallback keeps result-delta hashing stable across retries
+      const canonical = stableHashInput(result);
+      return crypto.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
     }
   }
 

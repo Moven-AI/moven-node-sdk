@@ -6,6 +6,7 @@ const hallucination_1 = require("./hallucination");
 const semantic_fingerprint_1 = require("./semantic-fingerprint");
 const adaptive_loop_1 = require("./adaptive-loop");
 const prompt_firewall_1 = require("./prompt-firewall");
+const safe_json_1 = require("./safe-json");
 class MovenHeuristicsEngine {
     static evaluate(state) {
         const opts = state.options;
@@ -295,7 +296,7 @@ class MovenHeuristicsEngine {
      */
     static runCheapModelArbitrator(state) {
         const calls = state.toolCalls.slice(-5);
-        const uniqueArgs = new Set(calls.map(c => JSON.stringify(c.args)));
+        const uniqueArgs = new Set(calls.map(c => (0, safe_json_1.safeStringify)(c.args)));
         const selectedModel = state.getCheaperModel(state.options.provider || state.options.judgeModel);
         // Cheap deterministic deduction fallback (simulating 200ms Judge evaluation with provider cheaper model)
         if (calls.length >= 3 && uniqueArgs.size === 1) {
@@ -323,7 +324,7 @@ class MovenHeuristicsEngine {
             tool: c.toolName,
             reasoning: recentSteps[i] || '(no reasoning captured)',
             resultSummary: c.result
-                ? (typeof c.result === 'string' ? c.result.substring(0, 120) : JSON.stringify(c.result).substring(0, 120))
+                ? (typeof c.result === 'string' ? c.result.substring(0, 120) : (0, safe_json_1.safeStringify)(c.result).substring(0, 120))
                 : '(pending)',
         }));
         // Deterministic logical-spiral detection (no actual LLM call in standalone mode)
@@ -339,7 +340,7 @@ class MovenHeuristicsEngine {
         }
         if (process.env.NODE_ENV !== 'test') {
             // In a real deployment, emit to /api/judge-arbitrator for actual LLM evaluation
-            console.log(`\x1b[36m🤖 [Async Judge – ${selectedModel}] Speculative gate PASSED. Context: ${JSON.stringify(compressedContext).substring(0, 200)}...\x1b[0m`);
+            console.log(`\x1b[36m🤖 [Async Judge – ${selectedModel}] Speculative gate PASSED. Context: ${(0, safe_json_1.safeStringify)(compressedContext).substring(0, 200)}...\x1b[0m`);
         }
         return { tripped: false };
     }

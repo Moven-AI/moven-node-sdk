@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { SemanticActionInput, CanonicalAction } from './types';
+import { safeStringify } from '../safe-json';
 
 export class SemanticCanonicalizer {
   public static normalizeArguments(args: Record<string, any> | undefined): string {
@@ -8,7 +9,7 @@ export class SemanticCanonicalizer {
     return sortedKeys
       .map(k => {
         const val = args[k];
-        const valStr = typeof val === 'object' ? JSON.stringify(val) : String(val);
+        const valStr = typeof val === 'object' ? safeStringify(val) : String(val);
         return `${k}: ${valStr.trim()}`;
       })
       .join('\n');
@@ -28,7 +29,7 @@ export class SemanticCanonicalizer {
   }
 
   public static canonicalResult(result: any): string {
-    const resStr = typeof result === 'object' ? JSON.stringify(result) : String(result ?? '');
+    const resStr = typeof result === 'object' ? safeStringify(result) : String(result ?? '');
     return `RESULT\n${resStr.trim()}`;
   }
 
@@ -92,7 +93,7 @@ export class SemanticCanonicalizer {
     const goalText = this.canonicalGoal(input.goal || 'Complete agent objective');
     const actionText = this.canonicalAction(input.tool, input.arguments || {});
     const expectedResultText = this.canonicalExpectedResult(
-      input.expectedOutcome || `${input.tool} result for ${JSON.stringify(input.arguments || {})}`
+      input.expectedOutcome || `${input.tool} result for ${safeStringify(input.arguments || {})}`
     );
 
     const { entities, attributes, intents } = this.extractArgumentBreakdown(input.tool, input.arguments || {});

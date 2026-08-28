@@ -2,6 +2,15 @@ import { MovenRunState, MovenOptions } from '../core/run-state';
 import { MovenHeuristicsEngine } from '../core/heuristics';
 import { MovenKillHandler } from '../kill/abort';
 import { MovenReporter } from '../reporter';
+import { MovenRewindEngine, RewindReceipt, RewindOptions } from '../core/rewind';
+import { CompensationInput } from '../core/checkpoint';
+
+declare module '../core/run-state' {
+  interface MovenOptions {
+    /** toolDef-level compensating action picked up by wrapToolsWithMoven */
+    compensate?: CompensationInput;
+  }
+}
 
 /**
  * Wraps tool definitions for Vercel AI SDK generateText/streamText.
@@ -34,6 +43,12 @@ export function wrapToolsWithMoven<T extends Record<string, any>>(
     if (typeof originalExecute !== 'function') {
       wrappedTools[toolName] = toolDef;
       continue;
+    }
+
+    // Saga: register a per-tool compensating action if the toolDef carries one
+    const inlineCompensation = (toolDef.compensate || (typeof toolDef === 'function' ? undefined : toolDef.moven?.compensate)) as CompensationInput | undefined;
+    if (inlineCompensation) {
+      state.registerCompensation(toolName, inlineCompensation);
     }
 
     const wrappedFn = async (args: any, context?: any) => {
@@ -92,6 +107,17 @@ export function createMovenCircuitBreaker(options?: MovenOptions) {
     getModel: () => state.activeModel,
     getActiveModel: () => state.activeModel,
     isFallback: () => state.isFallbackActive,
+    isHalted: () => state.halted,
+    /**
+     * Honest rewind: restores in-process state, cancels uncommitted calls,
+     * runs registered compensations, returns a receipt, halts + cooldowns.
+     */
+    rewind: async (opts?: RewindOptions): Promise<RewindReceipt | null> =>
+      MovenRewindEngine.rewind(state, reporter, opts),
+    /** Operator decision on a halted run: 'resume' | 'replan' | 'discard' */
+    resolveHalt: (decision: 'resume' | 'replan' | 'discard', opts?: { clearCooldown?: boolean }) =>
+      MovenRewindEngine.resolve(state, decision, opts),
+    registerCompensation: (toolName: string, comp: CompensationInput) => state.registerCompensation(toolName, comp),
     updateSettings: async (newOptions: Partial<MovenOptions>) => {
       state.updateOptions(newOptions);
       await reporter.reportRunStart(state);

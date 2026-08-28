@@ -6,6 +6,7 @@ const run_state_1 = require("../core/run-state");
 const heuristics_1 = require("../core/heuristics");
 const abort_1 = require("../kill/abort");
 const reporter_1 = require("../reporter");
+const rewind_1 = require("../core/rewind");
 /**
  * Wraps tool definitions for Vercel AI SDK generateText/streamText.
  * Intercepts tool execution, updates run-state, checks heuristics, and trips circuit breaker on limit violation.
@@ -29,6 +30,11 @@ function wrapToolsWithMoven(tools, options) {
         if (typeof originalExecute !== 'function') {
             wrappedTools[toolName] = toolDef;
             continue;
+        }
+        // Saga: register a per-tool compensating action if the toolDef carries one
+        const inlineCompensation = (toolDef.compensate || (typeof toolDef === 'function' ? undefined : toolDef.moven?.compensate));
+        if (inlineCompensation) {
+            state.registerCompensation(toolName, inlineCompensation);
         }
         const wrappedFn = async (args, context) => {
             // 1. Record tool call in run state
@@ -79,6 +85,15 @@ function createMovenCircuitBreaker(options) {
         getModel: () => state.activeModel,
         getActiveModel: () => state.activeModel,
         isFallback: () => state.isFallbackActive,
+        isHalted: () => state.halted,
+        /**
+         * Honest rewind: restores in-process state, cancels uncommitted calls,
+         * runs registered compensations, returns a receipt, halts + cooldowns.
+         */
+        rewind: async (opts) => rewind_1.MovenRewindEngine.rewind(state, reporter, opts),
+        /** Operator decision on a halted run: 'resume' | 'replan' | 'discard' */
+        resolveHalt: (decision, opts) => rewind_1.MovenRewindEngine.resolve(state, decision, opts),
+        registerCompensation: (toolName, comp) => state.registerCompensation(toolName, comp),
         updateSettings: async (newOptions) => {
             state.updateOptions(newOptions);
             await reporter.reportRunStart(state);

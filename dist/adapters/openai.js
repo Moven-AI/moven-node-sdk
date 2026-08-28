@@ -25,6 +25,7 @@ function wrapOpenAIToolRunner(toolName, fn, options, sharedState) {
         catch (err) {
             if (err?.name === 'MovenKillError')
                 throw err;
+            state.recordToolResult(log, { error: err?.message || String(err) }, Date.now() - start);
             throw err;
         }
     };

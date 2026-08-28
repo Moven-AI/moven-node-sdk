@@ -1,5 +1,6 @@
 import { MovenKillError } from './core/errors';
 import { MovenRunState } from './core/run-state';
+import type { RewindReceipt } from './core/rewind';
 export interface MovenReporterOptions {
     apiKey?: string;
     endpoint?: string;
@@ -27,6 +28,13 @@ export declare class MovenReporter {
         reason?: string;
     } | null>;
     reportKillEvent(error: MovenKillError, state: MovenRunState): Promise<boolean>;
+    /**
+     * Persists a rewind receipt to api.moven.dev → `rewind_receipts` +
+     * `rewind_call_outcomes` + `tool_cooldowns` + `agent_halt_state` tables,
+     * and upserts the registered compensations (inverse operations) into
+     * `tool_compensations` so the dashboard can show exactly what is reversible.
+     */
+    reportRewindReceipt(receipt: RewindReceipt, state: MovenRunState): Promise<boolean>;
     /**
      * Reports a completed normal trace execution with full prompt, spans, and checkpoints.
      */

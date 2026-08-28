@@ -1,10 +1,11 @@
 import { MovenKillMetrics } from './errors';
 import { BurnGuardOptions } from './burn-guard';
 import { SemanticCacheOptions } from './semantic-cache';
-import { MovenCheckpointManager } from './checkpoint';
+import { MovenCheckpointManager, MovenCompensationRegistry, CompensationInput } from './checkpoint';
 import { SemanticFingerprintOptions } from './semantic-fingerprint';
 import { PromptFirewallConfig } from './prompt-firewall';
 import { Layer2Options, MovenLayer2Guard, Layer2DecisionResult } from './layer2';
+export type ToolCallStatus = 'queued' | 'in_flight' | 'committed' | 'cancelled';
 export interface ToolCallLog {
     toolName: string;
     args: any;
@@ -18,8 +19,18 @@ export interface ToolCallLog {
     reasoning?: string;
     /** Goal-state hash of (reasoning intent + tool result) — set after recordToolResult */
     intentHash?: string;
-    /** Optional idempotency key passed with write tool */
+    /**
+     * Idempotency key. Auto-generated per unique call and injected into args so
+     * downstream APIs (Stripe, DBs) can dedupe — prevents double-fire when a
+     * call is retried after a rewind.
+     */
     idempotencyKey?: string;
+    /** Lifecycle: queued → in_flight → committed | cancelled */
+    status: ToolCallStatus;
+    /** Convenience flag: true only when the call reached the downstream API and returned */
+    committed?: boolean;
+    /** Depth/step of this call (matches the checkpoint created just before it) */
+    depth?: number;
     /** Estimated/actual tokens consumed by this single tool step (including model dispatch) */
     tokens?: number;
     /** Prompt tokens attributed to this step */
@@ -100,6 +111,20 @@ export interface MovenOptions {
     slidingWindowRequests?: number;
     /** Tool names that should be gated by the async LLM Judge before execution (e.g. 'sendEmail', 'writeToDb') */
     highRiskTools?: string[];
+    /** Bounded checkpoint retention window (default 50 turns) */
+    maxCheckpoints?: number;
+    /**
+     * Compensating actions (saga pattern) registered at construction:
+     * { create_row: (args, result) => db.delete_row(result.id) } or
+     * { 'stripe.charge': { type: 'api_call', name: 'stripe.refund_charge', config: {...} } }
+     */
+    compensations?: Record<string, CompensationInput>;
+    /** Auto-inject generated idempotency keys into tool args (default: true) */
+    autoInjectIdempotencyKey?: boolean;
+    /** Default cooldown applied to the offending tool after a rewind (default 300s) */
+    rewindCooldownSeconds?: number;
+    /** Per-tool inline compensating action for adapter wrappers: movenGuard('create_row', fn, { compensate: (args, result) => db.delete_row(result.id) }) */
+    compensate?: CompensationInput;
     promptCostPerMillion?: number;
     completionCostPerMillion?: number;
     apiKey?: string;
@@ -118,6 +143,7 @@ export interface MovenOptions {
         toolName?: string;
         args?: any;
     }) => void;
+    onRewind?: (receipt: any) => void;
     customCheck?: (state: MovenRunState) => {
         tripped: boolean;
         reason: string;
@@ -177,6 +203,23 @@ export declare class MovenRunState {
     layer2Guard: MovenLayer2Guard;
     /** Latest Layer 2 decision result */
     lastLayer2Result?: Layer2DecisionResult;
+    /** Agent context / plan. Deep-copied into every checkpoint; restored on rewind. */
+    context: Record<string, any>;
+    /** Working scratchpad (intermediate values, partial results). Checkpointed + restored. */
+    scratchpad: Record<string, any>;
+    /** Per-tool retry counters. Checkpointed + restored on rewind. */
+    retryCounts: Record<string, number>;
+    /** After a rewind the agent is halted — a human decision or re-plan is required. */
+    halted: boolean;
+    haltReason?: string;
+    /** Set when the operator forces a re-plan step instead of a blind resume. */
+    replanRequested: boolean;
+    /** toolName (or toolName:argsHash) → cooldown expiry epoch ms */
+    toolCooldowns: Map<string, number>;
+    /** Compensating-action registry (saga) — used by the rewind engine */
+    readonly compensations: MovenCompensationRegistry;
+    /** Ctrl+Z checkpoint ledger (bounded retention) */
+    checkpointManager: MovenCheckpointManager;
     constructor(options?: MovenOptions);
     setUserRequest(request: string): void;
     setSystemPrompt(prompt: string): void;
@@ -187,11 +230,53 @@ export declare class MovenRunState {
     registerCleanTurn(): boolean;
     updateOptions(newRules: Partial<MovenOptions>): void;
     getCheaperModel(providerOrModel?: string): string;
-    readonly checkpointManager: MovenCheckpointManager;
     isSafeToRetryTool(toolName: string): boolean;
     isReadOnlyTool(toolName: string): boolean;
+    /**
+     * The interception point. Called BEFORE the real tool body runs — checks
+     * the halt gate and cooldowns synchronously so a blocked call can never
+     * reach the network (zero-proxy, in-process interception).
+     * Throws MovenKillError when the call must not execute.
+     */
+    private interceptionGuard;
     recordToolCall(toolName: string, args: any): ToolCallLog;
+    /** Registers a call as queued (scheduled but not started). Not checkpointed, not costed. */
+    queueToolCall(toolName: string, args: any): ToolCallLog;
+    /** All calls that have been dispatched but have not committed (or been cancelled). */
+    pendingCalls(): ToolCallLog[];
+    /** Cancels every queued / in-flight call. Returns the cancelled logs. */
+    cancelPending(): ToolCallLog[];
     recordToolResult(logOrResult: ToolCallLog | any, result?: any, durationMs?: number): void;
+    updateContext(patch: Record<string, any>): void;
+    updateScratchpad(patch: Record<string, any>): void;
+    incrementRetry(toolName: string): number;
+    /** Register a compensating action (saga inverse) for a tool. */
+    registerCompensation(toolName: string, input: CompensationInput): void;
+    /**
+     * Puts a tool on cooldown. Returns the cooldown expiry (epoch ms).
+     * With argsHash the cooldown targets the identical call; without it the
+     * whole tool is blocked — safer for incident response.
+     */
+    applyCooldown(toolName: string | undefined, seconds?: number, argsHash?: string): number;
+    isToolOnCooldown(toolName: string, argsHash?: string): boolean;
+    cooldownRemainingMs(toolName?: string): number;
+    clearCooldowns(): void;
+    /**
+     * Mechanism 1 rewind: pointer restoration of in-process orchestration state.
+     * External side effects are NOT touched here — the rewind engine handles
+     * sagas/manual-review for committed calls before invoking this.
+     * Returns the number of truncated (forgotten) tool-call log entries.
+     */
+    restoreFromCheckpoint(ckpt: {
+        context?: Record<string, any>;
+        scratchpad?: Record<string, any>;
+        retryCounts?: Record<string, number>;
+        messagesSnapshot?: any[];
+        model?: string;
+        cumulativeCost: number;
+        stepIndex: number;
+        timestamp: number;
+    }): number;
     recordCallOutcome(success: boolean, latencyMs?: number, isSchemaFailure?: boolean): void;
     recordSchemaValidationFailure(toolName?: string, errorMsg?: string): void;
     recordStepTokens(promptTokens: number, completionTokens?: number): void;

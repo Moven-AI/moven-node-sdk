@@ -1,4 +1,5 @@
 import { MovenRunState } from './run-state';
+import { safeStringify } from './safe-json';
 
 export interface HallucinationResult {
   tripped: boolean;
@@ -52,7 +53,7 @@ export class MovenHallucinationDetector {
     if (calls.length >= 2) {
       const prevCall = calls[calls.length - 2];
       if (prevCall.result) {
-        const resultStr = typeof prevCall.result === 'string' ? prevCall.result : JSON.stringify(prevCall.result);
+        const resultStr = typeof prevCall.result === 'string' ? prevCall.result : safeStringify(prevCall.result);
         const isErrorResult = /404|not found|enoent|does not exist|access denied|unauthorized|failed/i.test(resultStr);
 
         if (isErrorResult) {
@@ -71,12 +72,12 @@ export class MovenHallucinationDetector {
           };
 
           const prevValues = extractArgValues(prevCall.args);
-          const currentArgsStr = JSON.stringify(lastCall.args);
+          const currentArgsStr = safeStringify(lastCall.args);
 
           for (const val of prevValues) {
             if (currentArgsStr.includes(val)) {
               // Count how many consecutive times this failed resource is pursued
-              const failedPursuits = calls.filter(c => JSON.stringify(c.args).includes(val)).length;
+              const failedPursuits = calls.filter(c => safeStringify(c.args).includes(val)).length;
               if (failedPursuits >= 2) {
                 return {
                   tripped: true,
@@ -108,7 +109,7 @@ export class MovenHallucinationDetector {
 
           // Check if previous 3 tool results were empty or identical error
           const resultsIdentical = recent4.slice(0, 3).every(c => 
-            c.result && JSON.stringify(c.result) === JSON.stringify(recent4[0].result)
+            c.result && safeStringify(c.result) === safeStringify(recent4[0].result)
           );
 
           if (numericDrifts && resultsIdentical && recent4[0].result !== undefined) {

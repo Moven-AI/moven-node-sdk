@@ -1,4 +1,5 @@
 import { ToolCallLog } from './run-state';
+import { safeStringify } from './safe-json';
 
 export type ToolIntentCategory = 'EXPLORATORY' | 'MUTATING' | 'POLLING' | 'COMPUTATIONAL';
 
@@ -130,7 +131,7 @@ export class MovenAdaptiveLoopEngine {
       if (typeof args.url === 'string') return args.url;
       if (typeof args.path === 'string') return args.path;
       if (typeof args.search_term === 'string') return args.search_term;
-      return JSON.stringify(args);
+      return safeStringify(args);
     }
     return String(args);
   }
@@ -188,7 +189,7 @@ export class MovenAdaptiveLoopEngine {
     if (typeof result === 'string') {
       text = result;
     } else if (typeof result === 'object') {
-      text = JSON.stringify(result);
+      text = safeStringify(result);
     } else {
       text = String(result);
     }

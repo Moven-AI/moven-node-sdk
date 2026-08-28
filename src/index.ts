@@ -1,8 +1,11 @@
 export { MovenRunState, DEFAULT_CHEAPER_MODEL_MAP } from './core/run-state';
-export type { MovenOptions, ToolCallLog } from './core/run-state';
+export type { MovenOptions, ToolCallLog, ToolCallStatus } from './core/run-state';
 
-export { MovenCheckpointManager } from './core/checkpoint';
-export type { AgentCheckpointState } from './core/checkpoint';
+export { MovenCheckpointManager, MovenCompensationRegistry, snapshotState } from './core/checkpoint';
+export type { AgentCheckpointState, CompensationEntry, CompensationInput, CompensationFn } from './core/checkpoint';
+
+export { MovenRewindEngine } from './core/rewind';
+export type { RewindReceipt, RewindCallOutcome, RewindOutcome, RewindOptions } from './core/rewind';
 
 export { MovenOvernightBurnGuard } from './core/burn-guard';
 export type { BurnGuardOptions, BurnGuardCheckResult } from './core/burn-guard';
@@ -67,6 +70,23 @@ export { wrapAzureOpenAITools } from './adapters/azure';
 export { wrapBedrockTools } from './adapters/bedrock';
 export { wrapOllamaTools } from './adapters/ollama';
 export { wrapCustomTool, wrapCustomToolRegistry, movenGuard } from './adapters/custom';
+export {
+  wrapProviderTools,
+  wrapXAITools,
+  wrapPerplexityTools,
+  wrapDeepSeekTools,
+  wrapTogetherTools,
+  wrapFireworksTools,
+  wrapDeepInfraTools,
+  wrapCerebrasTools,
+  wrapSambaNovaTools,
+  wrapNvidiaNimTools,
+  wrapMoonshotTools,
+  wrapQwenTools,
+  wrapZhipuTools,
+  wrapYiTools,
+  wrapHuggingFaceTools,
+} from './adapters/enterprise-providers';
 export { moven } from './init';
 export type { MovenInitConfig } from './init';
 

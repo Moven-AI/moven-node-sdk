@@ -22,6 +22,11 @@ export function wrapCustomTool<T extends (...args: any[]) => Promise<any>>(
   const state = sharedState || new MovenRunState(optsWithProvider);
   const reporter = new MovenReporter(options?.apiKey, options?.endpoint);
 
+  // Saga: register the inline compensating action (inverse) for this tool
+  if (options?.compensate) {
+    state.registerCompensation(toolName, options.compensate);
+  }
+
   const wrapped = async (...args: Parameters<T>): Promise<ReturnType<T>> => {
     const log = state.recordToolCall(toolName, args[0]);
 
@@ -38,8 +43,11 @@ export function wrapCustomTool<T extends (...args: any[]) => Promise<any>>(
       await MovenKillHandler.handleTripResult(postCheck, state, reporter);
 
       return result;
-    } catch (err) {
-      if ((err as any)?.name === 'MovenKillError') throw err;
+    } catch (err: any) {
+      if (err?.name === 'MovenKillError') throw err;
+      // Record the failure so the call doesn't stay in_flight forever — the
+      // rewind receipt then reflects it honestly (reached the downstream API).
+      state.recordToolResult(log, { error: err?.message || String(err) }, Date.now() - start);
       throw err;
     }
   };

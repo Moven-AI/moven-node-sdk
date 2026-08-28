@@ -5,6 +5,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenRunState = exports.DEFAULT_CHEAPER_MODEL_MAP = void 0;
 const crypto_1 = __importDefault(require("crypto"));
+const errors_1 = require("./errors");
+const safe_json_1 = require("./safe-json");
 const checkpoint_1 = require("./checkpoint");
 const semantic_fingerprint_1 = require("./semantic-fingerprint");
 const pricing_1 = require("./pricing");
@@ -37,6 +39,19 @@ exports.DEFAULT_CHEAPER_MODEL_MAP = {
     'claude-3-opus-20240229': 'claude-3-haiku-20240307',
     'gemini-1.5-pro': 'gemini-2.5-flash-lite',
     'gemini-2.0-flash': 'gemini-2.5-flash-lite',
+    // Enterprise direct providers
+    'x-ai': 'grok-3-fast',
+    xai: 'grok-3-fast',
+    perplexity: 'sonar',
+    deepseek: 'deepseek-chat',
+    moonshot: 'moonshot-v1-8k',
+    qwen: 'qwen-turbo',
+    dashscope: 'qwen-turbo',
+    zhipu: 'glm-4-flash',
+    yi: 'yi-lightning',
+    huggingface: 'Qwen/Qwen2.5-7B-Instruct',
+    nvidia: 'meta/llama-3.1-8b-instruct',
+    '01-ai': 'yi-lightning',
 };
 class MovenRunState {
     runId;
@@ -82,6 +97,25 @@ class MovenRunState {
     layer2Guard;
     /** Latest Layer 2 decision result */
     lastLayer2Result;
+    // ─── IN-PROCESS ORCHESTRATION STATE (rewindable — Mechanism 1) ───────────
+    /** Agent context / plan. Deep-copied into every checkpoint; restored on rewind. */
+    context = {};
+    /** Working scratchpad (intermediate values, partial results). Checkpointed + restored. */
+    scratchpad = {};
+    /** Per-tool retry counters. Checkpointed + restored on rewind. */
+    retryCounts = {};
+    // ─── HALT GATE + TOOL COOLDOWNS (post-rewind safety) ─────────────────────
+    /** After a rewind the agent is halted — a human decision or re-plan is required. */
+    halted = false;
+    haltReason;
+    /** Set when the operator forces a re-plan step instead of a blind resume. */
+    replanRequested = false;
+    /** toolName (or toolName:argsHash) → cooldown expiry epoch ms */
+    toolCooldowns = new Map();
+    /** Compensating-action registry (saga) — used by the rewind engine */
+    compensations = new checkpoint_1.MovenCompensationRegistry();
+    /** Ctrl+Z checkpoint ledger (bounded retention) */
+    checkpointManager;
     constructor(options = {}) {
         this.options = {
             maxRepeatCalls: 5,
@@ -120,6 +154,13 @@ class MovenRunState {
         this.activeModel = this.options.model || this.options.currentModel || 'openai/gpt-4o-mini';
         // Initialize Layer 2 Semantic Guard
         this.layer2Guard = new layer2_1.MovenLayer2Guard(this.agentId, this.options.layer2);
+        // Bounded checkpoint ledger + compensation registry (saga pattern)
+        this.checkpointManager = new checkpoint_1.MovenCheckpointManager(this.options.maxCheckpoints ?? 50);
+        if (options.compensations) {
+            for (const [toolName, comp] of Object.entries(options.compensations)) {
+                this.compensations.register(toolName, comp);
+            }
+        }
         // Always trigger dynamic live pricing engine refresh
         pricing_1.MovenDynamicPricingEngine.refreshLivePricing();
         const req = options.userRequest || options.goal || options.metadata?.user_request || options.metadata?.userRequest;
@@ -272,7 +313,6 @@ class MovenRunState {
         // Absolute fallback
         return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
     }
-    checkpointManager = new checkpoint_1.MovenCheckpointManager();
     isSafeToRetryTool(toolName) {
         const list = this.options.safeToRetryTools || [
             'check_build_status', 'poll_task', 'get_job_status', 'wait_for_lock',
@@ -286,9 +326,62 @@ class MovenRunState {
         const lower = toolName.toLowerCase();
         return customList.includes(toolName) || defaultReadOnlyPrefixes.some(prefix => lower.startsWith(prefix));
     }
+    /**
+     * The interception point. Called BEFORE the real tool body runs — checks
+     * the halt gate and cooldowns synchronously so a blocked call can never
+     * reach the network (zero-proxy, in-process interception).
+     * Throws MovenKillError when the call must not execute.
+     */
+    interceptionGuard(toolName, argsHash) {
+        if (this.isKilled) {
+            throw new errors_1.MovenKillError({
+                runId: this.runId,
+                heuristic: 'repeat_tool_call',
+                reason: 'Execution blocked: circuit breaker already tripped for this run.',
+                toolName,
+                metrics: this.getMetrics(),
+            });
+        }
+        if (this.halted) {
+            throw new errors_1.MovenKillError({
+                runId: this.runId,
+                heuristic: 'repeat_tool_call',
+                reason: `Execution blocked: agent is HALTED after a rewind. ${this.haltReason || 'A human decision or re-plan is required before resume.'}`,
+                toolName,
+                metrics: this.getMetrics(),
+            });
+        }
+        if (this.isToolOnCooldown(toolName, argsHash)) {
+            const remaining = Math.ceil(this.cooldownRemainingMs(toolName) / 1000);
+            throw new errors_1.MovenKillError({
+                runId: this.runId,
+                heuristic: 'repeat_tool_call',
+                reason: `Execution blocked: tool '${toolName}' is on post-rewind cooldown (${remaining}s remaining). It cannot retrigger the identical loop until the cooldown expires or an operator clears it.`,
+                toolName,
+                metrics: this.getMetrics(),
+            });
+        }
+    }
     recordToolCall(toolName, args) {
         const argsHash = this.hashArguments(toolName, args);
-        const idempotencyKey = args?.idempotency_key || args?.idempotencyKey || args?.idempotency_token || args?.client_request_token;
+        // In-process interception BEFORE anything can leave the process
+        this.interceptionGuard(toolName, argsHash);
+        // Saga: idempotency key — generate if absent and inject into args so the
+        // downstream API can dedupe a post-rewind retry of the same logical call.
+        const autoInject = this.options.autoInjectIdempotencyKey !== false;
+        let idempotencyKey = args?.idempotency_key || args?.idempotencyKey || args?.idempotency_token || args?.client_request_token;
+        if (!idempotencyKey && autoInject) {
+            idempotencyKey = `mvn_${this.runId}_${toolName}_${this.depth + 1}_${argsHash}`.substring(0, 72);
+            if (args && typeof args === 'object' && !Array.isArray(args) && !Object.isFrozen(args)) {
+                try {
+                    args.idempotency_key = idempotencyKey;
+                }
+                catch {
+                    /* frozen/sealed args — key still recorded on the log */
+                }
+            }
+        }
+        idempotencyKey = typeof idempotencyKey === 'string' ? idempotencyKey : undefined;
         const isPollingTool = this.isSafeToRetryTool(toolName);
         const isReadOnly = this.isReadOnlyTool(toolName);
         this.depth += 1;
@@ -311,7 +404,9 @@ class MovenRunState {
             args,
             argsHash,
             timestamp: Date.now(),
-            idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+            idempotencyKey,
+            status: 'in_flight',
+            depth: this.depth,
             isPollingTool,
             isReadOnly,
             promptTokens,
@@ -324,9 +419,49 @@ class MovenRunState {
         this.cumulativeCompletionTokens += completionTokens;
         this.cumulativeTotalTokens += costData.totalTokens;
         this.cumulativeCost += costData.stepCost;
-        // Snapshot Ctrl+Z step checkpoint with prompt & state context
-        this.checkpointManager.createCheckpoint(this.runId, this.agentId, this.depth, toolName, args, this.cumulativeCost, undefined, { toolArgs: args, reasoning: this.reasoningSteps[this.reasoningSteps.length - 1] }, this.systemPrompt, this.userRequest || (typeof args?.prompt === 'string' ? args.prompt : undefined), this.activeModel, `Step ${this.depth}: ${toolName}`);
+        // Snapshot Ctrl+Z step checkpoint — immutable deep copy of the FULL
+        // in-process orchestration state (context, scratchpad, retry counters,
+        // conversation history) taken BEFORE this call can touch the outside world.
+        // NOTE: created with stepIndex === this.depth === log.depth — the checkpoint
+        // captures the state immediately BEFORE the call at the same depth executes.
+        this.checkpointManager.createCheckpoint(this.runId, this.agentId, this.depth, toolName, args, this.cumulativeCost, this.prompts.slice(-50), { toolArgs: args, reasoning: this.reasoningSteps[this.reasoningSteps.length - 1] }, this.systemPrompt, this.userRequest || (typeof args?.prompt === 'string' ? args.prompt : undefined), this.activeModel, `Step ${this.depth}: ${toolName}`, {
+            context: this.context,
+            scratchpad: this.scratchpad,
+            retryCounts: this.retryCounts,
+            turnNumber: this.depth,
+        });
         return log;
+    }
+    /** Registers a call as queued (scheduled but not started). Not checkpointed, not costed. */
+    queueToolCall(toolName, args) {
+        const argsHash = this.hashArguments(toolName, args);
+        const log = {
+            toolName,
+            args,
+            argsHash,
+            timestamp: Date.now(),
+            status: 'queued',
+            depth: this.depth + 1,
+            isPollingTool: this.isSafeToRetryTool(toolName),
+            isReadOnly: this.isReadOnlyTool(toolName),
+        };
+        this.toolCalls.push(log);
+        return log;
+    }
+    /** All calls that have been dispatched but have not committed (or been cancelled). */
+    pendingCalls() {
+        return this.toolCalls.filter(c => c.status === 'queued' || c.status === 'in_flight');
+    }
+    /** Cancels every queued / in-flight call. Returns the cancelled logs. */
+    cancelPending() {
+        const cancelled = [];
+        for (const c of this.toolCalls) {
+            if (c.status === 'queued' || c.status === 'in_flight') {
+                c.status = 'cancelled';
+                cancelled.push(c);
+            }
+        }
+        return cancelled;
     }
     recordToolResult(logOrResult, result, durationMs) {
         let log;
@@ -342,6 +477,9 @@ class MovenRunState {
         if (log) {
             log.result = res;
             log.durationMs = durationMs || (Date.now() - log.timestamp);
+            // The call reached the downstream API and returned — it is committed.
+            log.status = 'committed';
+            log.committed = true;
             // Compute and attach Result-Delta Hash (status / payload progression)
             const resultHash = this.hashResultState(res);
             log.resultHash = resultHash;
@@ -374,6 +512,92 @@ class MovenRunState {
                 this.layer2Guard.recordToolResult(log.toolName, log.args || {}, res);
             }
         }
+    }
+    // ─── ORCHESTRATION STATE MUTATORS (all rewindable) ──────────────────────
+    updateContext(patch) {
+        this.context = { ...this.context, ...patch };
+    }
+    updateScratchpad(patch) {
+        this.scratchpad = { ...this.scratchpad, ...patch };
+    }
+    incrementRetry(toolName) {
+        this.retryCounts[toolName] = (this.retryCounts[toolName] || 0) + 1;
+        return this.retryCounts[toolName];
+    }
+    /** Register a compensating action (saga inverse) for a tool. */
+    registerCompensation(toolName, input) {
+        this.compensations.register(toolName, input);
+    }
+    // ─── HALT GATE + COOLDOWNS ───────────────────────────────────────────────
+    /**
+     * Puts a tool on cooldown. Returns the cooldown expiry (epoch ms).
+     * With argsHash the cooldown targets the identical call; without it the
+     * whole tool is blocked — safer for incident response.
+     */
+    applyCooldown(toolName, seconds = this.options.rewindCooldownSeconds ?? 300, argsHash) {
+        if (!toolName)
+            return 0;
+        const until = Date.now() + seconds * 1000;
+        this.toolCooldowns.set(argsHash ? `${toolName}:${argsHash}` : toolName, until);
+        return until;
+    }
+    isToolOnCooldown(toolName, argsHash) {
+        const now = Date.now();
+        const exact = argsHash ? this.toolCooldowns.get(`${toolName}:${argsHash}`) : undefined;
+        const toolWide = this.toolCooldowns.get(toolName);
+        if (exact !== undefined && exact > now)
+            return true;
+        if (toolWide !== undefined && toolWide > now)
+            return true;
+        return false;
+    }
+    cooldownRemainingMs(toolName) {
+        const now = Date.now();
+        let max = 0;
+        for (const [key, until] of this.toolCooldowns.entries()) {
+            if (until <= now) {
+                this.toolCooldowns.delete(key);
+                continue;
+            }
+            if (!toolName || key === toolName || key.startsWith(`${toolName}:`)) {
+                max = Math.max(max, until - now);
+            }
+        }
+        return max;
+    }
+    clearCooldowns() {
+        this.toolCooldowns.clear();
+    }
+    /**
+     * Mechanism 1 rewind: pointer restoration of in-process orchestration state.
+     * External side effects are NOT touched here — the rewind engine handles
+     * sagas/manual-review for committed calls before invoking this.
+     * Returns the number of truncated (forgotten) tool-call log entries.
+     */
+    restoreFromCheckpoint(ckpt) {
+        this.context = ckpt.context ? { ...ckpt.context } : {};
+        this.scratchpad = ckpt.scratchpad ? { ...ckpt.scratchpad } : {};
+        this.retryCounts = ckpt.retryCounts ? { ...ckpt.retryCounts } : {};
+        if (ckpt.messagesSnapshot) {
+            this.prompts = ckpt.messagesSnapshot.map(p => ({ ...p }));
+        }
+        if (ckpt.model)
+            this.activeModel = ckpt.model;
+        this.cumulativeCost = ckpt.cumulativeCost || 0;
+        this.depth = ckpt.stepIndex - 1 < 0 ? 0 : ckpt.stepIndex - 1;
+        // Keep only calls strictly BEFORE the checkpoint's step (checkpoint S is
+        // captured before call S runs, so call S and everything after is undone).
+        const keepCount = this.toolCalls.filter(c => (c.depth !== undefined ? c.depth < ckpt.stepIndex : c.timestamp <= ckpt.timestamp)).length;
+        const truncated = this.toolCalls.length - keepCount;
+        this.toolCalls = this.toolCalls.slice(0, keepCount);
+        // Reset inference-window state to post-restore baseline
+        this.stateHashes = [];
+        this.intentHashes = [];
+        this.reasoningSteps = [];
+        this.consecutiveSchemaFailures = 0;
+        this.lastLayer2Result = undefined;
+        this.replanRequested = false;
+        return truncated;
     }
     recordCallOutcome(success, latencyMs = 0, isSchemaFailure = false) {
         const MAX_WINDOW = this.options.slidingWindowRequests || 20;
@@ -531,7 +755,8 @@ class MovenRunState {
     }
     canonicalStringify(obj) {
         if (obj === null || typeof obj !== 'object') {
-            return JSON.stringify(obj);
+            // BigInt/functions/circular leaves must not throw the hot path
+            return (0, safe_json_1.safeStringify)(obj);
         }
         if (Array.isArray(obj)) {
             return '[' + obj.map(item => this.canonicalStringify(item)).join(',') + ']';
@@ -546,7 +771,10 @@ class MovenRunState {
             return crypto_1.default.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
         }
         catch {
-            return `${toolName}_${Date.now()}`;
+            // DETERMINISTIC fallback — a unique-per-call value here would silently
+            // disable repeat detection and make idempotency keys retry-unique.
+            const canonical = (0, safe_json_1.stableHashInput)({ toolName, args: args || {} });
+            return crypto_1.default.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
         }
     }
     hashResultState(result) {
@@ -569,7 +797,9 @@ class MovenRunState {
             return crypto_1.default.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
         }
         catch {
-            return `res_${Date.now()}`;
+            // Deterministic fallback keeps result-delta hashing stable across retries
+            const canonical = (0, safe_json_1.stableHashInput)(result);
+            return crypto_1.default.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
         }
     }
     hashStateTurn(toolName, result) {

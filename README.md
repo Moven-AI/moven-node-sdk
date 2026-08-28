@@ -24,7 +24,7 @@ Observability platforms (LangSmith, Langfuse, Helicone) record what happened **a
 - 🔁 **Deep Canonical Parameter Hashing**: SHA-256 canonical JSON serialization detects duplicate parameter loops regardless of object key order.
 - 💸 **Dynamic Live Pricing Engine**: Real-time token math synced from `https://api.moven.dev/v1/models` calculates exact dollar savings when loops are intercepted.
 - 🛡️ **Zero-Trust Hallucination Guard**: Intercepts unpopulated placeholder arguments (`TODO_...`, `REPLACE_ME`) and non-existent schema parameters.
-- ⏪ **Ctrl+Z Step Checkpoints**: Automatically snapshots agent state & prompts before every tool execution for instant time-travel rewinds.
+- ⏪ **Honest Rewind (Ctrl+Z)**: Automatically snapshots the full in-process orchestration state (context, scratchpad, retry counters, conversation history) before every tool execution. Rewind restores it by pointer swap, cancels queued/in-flight calls, runs registered saga compensations for committed calls, returns a durable receipt, and **halts** with the offending tool on a cooldown.
 - 🤖 **Multi-Model Dynamic Auto-Fallback**: Automatically falls back to cheaper models (e.g. GPT-4o ➔ Gemini 2.5 Flash Lite) during loops.
 - 🌐 **15+ Provider & Framework Adapters**: First-class support for OpenAI, Anthropic Claude, Google Gemini, LangChain, LangGraph, Vercel AI SDK, CrewAI, AutoGen, LlamaIndex, Groq, Mistral, AWS Bedrock, Azure OpenAI, and Ollama.
 
@@ -138,6 +138,51 @@ const savings = MovenDynamicPricingEngine.calculateMoneySaved({
 
 console.log(`Prevented $${savings.moneySaved} USD (${savings.totalPreventedTokens} tokens saved)`);
 ```
+
+---
+
+## ⏪ Honest Rewind (`MovenRewindEngine`)
+
+Rewind gives a real guarantee by separating what it *can* undo from what it *cannot*:
+
+1. **Restores in-process orchestration state only** — context, scratchpad, retry counters, conversation pointer. Always safe. Checkpoints are immutable deep copies captured before every tool call (a few KB of JSON, sub-millisecond) with a bounded retention window.
+2. **Cancels anything queued / in-flight** that hasn't committed yet.
+3. **Runs registered compensating actions (saga)** for each call that committed since the checkpoint. No inverse registered → the call is listed explicitly as *executed, not reversed*. It never pretends.
+4. **Returns a receipt, not a toast** — N fully reversed, M never executed, K needing manual review, with the explicit list.
+5. **Halts.** No auto-resume into the same loop. The offending tool goes on a cooldown so it cannot retrigger the identical loop; resuming requires a human decision or a re-plan.
+
+```typescript
+import { MovenRunState, MovenRewindEngine } from 'moven-sdk';
+
+const state = new MovenRunState({
+  agentName: 'payments-agent',
+  // Saga: register an inverse alongside the protected tool
+  compensations: {
+    create_row: (args, result) => db.delete_row(result.id),            // in-process handler
+    'stripe.charge': { type: 'api_call', name: 'stripe.refund_charge' } // declarative (stored in DB)
+  },
+});
+
+state.registerCompensation('send_email', { type: 'manual', name: 'manual_email_recall' });
+
+// ... after the breaker trips:
+const receipt = await MovenRewindEngine.rewind(state, reporter, { checkpointKey: 'ckpt_turn_2' });
+// receipt.fullyReversed, receipt.neverExecuted, receipt.needsManualReview,
+// receipt.halted === true, receipt.cooldownUntil
+
+// Operator decision on the halted run (offending tool stays on cooldown across a re-plan):
+MovenRewindEngine.resolve(state, 'replan');   // or 'resume' | 'discard'
+```
+
+With the Vercel AI SDK adapter you can also declare the inverse inline:
+
+```typescript
+const { tools, state, rewind, resolveHalt } = createMovenCircuitBreaker({ agentName: 'feature-tester-08' });
+// tools: { createRow: tool({ ..., execute: fn, compensate: (args, result) => db.delete_row(result.id) }) }
+const receipt = await rewind({ checkpointKey: 'ckpt_turn_2' });
+```
+
+Every wrapped call carries a generated **idempotency key** (`mvn_<run>_<tool>_<depth>_<hash>`) injected into args, so a post-rewind retry can never double-fire the same charge downstream.
 
 ---
 

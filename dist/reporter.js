@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MovenReporter = void 0;
 const run_state_1 = require("./core/run-state");
 const pii_1 = require("./core/pii");
+const safe_json_1 = require("./core/safe-json");
 class MovenReporter {
     apiKey;
     endpoint;
@@ -41,7 +42,7 @@ class MovenReporter {
                     'Content-Type': 'application/json',
                     ...(this.apiKey ? { 'x-moven-api-key': this.apiKey } : {}),
                 },
-                body: JSON.stringify(sanitized),
+                body: (0, safe_json_1.safeStringify)(sanitized),
             });
             return res.ok;
         }
@@ -94,7 +95,7 @@ class MovenReporter {
             const res = await this.fetchWithRetry(judgeEndpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+                body: (0, safe_json_1.safeStringify)({
                     provider: state.options.provider || 'openrouter',
                     modelAuthor: state.options.modelAuthor || '',
                     currentModel: state.options.currentModel || state.options.judgeModel || '',
@@ -135,9 +136,11 @@ class MovenReporter {
             version: state.version,
             tags: state.tags,
             userId: state.options.userId || state.options.userEmail,
-            user_request: state.userRequest || (state.options.metadata?.user_request) || (state.options.metadata?.userRequest),
-            system_prompt: state.systemPrompt || (state.options.metadata?.system_prompt) || (state.options.metadata?.systemPrompt),
+            user_request: state.userRequest || (state.options.metadata?.user_request) || (state.options.metadata?.userRequest) || state.options.userRequest || state.options.userPrompt,
+            user_prompt: state.userRequest || (state.options.metadata?.user_prompt) || state.options.userPrompt || state.options.userRequest,
+            system_prompt: state.systemPrompt || (state.options.metadata?.system_prompt) || (state.options.metadata?.systemPrompt) || state.options.systemPrompt,
             prompts: state.prompts,
+            messages: state.options?.messages || (state.options.metadata?.messages) || [],
             checkpoints: state.checkpointManager.getCheckpoints(),
             workflow_graph: workflowGraph,
             metadata: {
@@ -145,6 +148,7 @@ class MovenReporter {
                 model,
                 provider,
                 user_request: state.userRequest,
+                user_prompt: state.userRequest,
                 system_prompt: state.systemPrompt,
                 workflow_graph: workflowGraph,
             },
@@ -154,6 +158,10 @@ class MovenReporter {
             toolArgs: error.toolArgs,
             metrics: error.metrics,
             toolCalls: state.toolCalls,
+            halted: state.halted,
+            halt_reason: state.haltReason,
+            cooldown_until: state.cooldownRemainingMs() > 0 ? new Date(Date.now() + state.cooldownRemainingMs()).toISOString() : null,
+            compensations: state.compensations.list(),
             timestamp: new Date().toISOString(),
         };
         // Note: If no API key is provided, still attempt local endpoint POST for dashboard telemetry & webhooks
@@ -164,7 +172,7 @@ class MovenReporter {
             const response = await this.fetchWithRetry(this.endpoint, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify(payload),
+                body: (0, safe_json_1.safeStringify)(payload),
             });
             return response.ok;
         }
@@ -179,6 +187,54 @@ class MovenReporter {
         }
     }
     /**
+     * Persists a rewind receipt to api.moven.dev → `rewind_receipts` +
+     * `rewind_call_outcomes` + `tool_cooldowns` + `agent_halt_state` tables,
+     * and upserts the registered compensations (inverse operations) into
+     * `tool_compensations` so the dashboard can show exactly what is reversible.
+     */
+    async reportRewindReceipt(receipt, state) {
+        const payload = {
+            event: 'rewind_receipt',
+            runId: state.runId,
+            agentId: state.agentId,
+            agentName: state.agentName,
+            framework: state.framework,
+            model: state.getModel(),
+            provider: state.options.provider || 'openrouter',
+            version: state.version,
+            tags: state.tags,
+            userId: state.options.userId || state.options.userEmail,
+            user_request: state.userRequest,
+            user_prompt: state.userRequest,
+            system_prompt: state.systemPrompt,
+            receipt,
+            // Serializable inverse-operation registry → tool_compensations table
+            compensations: state.compensations.list(),
+            halted: state.halted,
+            halt_reason: state.haltReason,
+            metadata: {
+                ...(state.options.metadata || {}),
+                offending_tool: receipt.offendingTool,
+                checkpoint_key: receipt.checkpoint.key,
+            },
+            timestamp: new Date().toISOString(),
+        };
+        try {
+            const headers = { 'Content-Type': 'application/json' };
+            if (this.apiKey)
+                headers['x-moven-api-key'] = this.apiKey;
+            const res = await this.fetchWithRetry(this.endpoint, {
+                method: 'POST',
+                headers,
+                body: (0, safe_json_1.safeStringify)(payload),
+            });
+            return res.ok;
+        }
+        catch {
+            return false;
+        }
+    }
+    /**
      * Reports a completed normal trace execution with full prompt, spans, and checkpoints.
      */
     async reportTrace(state, extra) {
@@ -186,6 +242,9 @@ class MovenReporter {
         const model = state.getModel() || state.options.model || state.options.currentModel || 'deepseek/deepseek-chat';
         const provider = state.options.provider || 'openrouter';
         const metrics = state.getMetrics();
+        const userPrompt = state.userRequest || extra?.user_prompt || extra?.user_request || state.options.userPrompt || state.options.userRequest || 'Autonomous agent execution';
+        const systemPrompt = state.systemPrompt || extra?.system_prompt || state.options.systemPrompt;
+        const messages = state.options?.messages || extra?.messages || [];
         const payload = {
             event: 'tool',
             runId: state.runId,
@@ -197,9 +256,11 @@ class MovenReporter {
             version: state.version,
             tags: state.tags,
             userId: state.options.userId || state.options.userEmail,
-            user_request: state.userRequest || extra?.user_request || 'Autonomous agent execution',
-            system_prompt: state.systemPrompt || extra?.system_prompt,
+            user_request: userPrompt,
+            user_prompt: userPrompt,
+            system_prompt: systemPrompt,
             prompts: state.prompts,
+            messages,
             checkpoints: state.checkpointManager.getCheckpoints(),
             toolCalls: state.toolCalls,
             workflow_graph: workflowGraph,
@@ -223,8 +284,9 @@ class MovenReporter {
                 ...(state.options.metadata || {}),
                 model,
                 provider,
-                user_request: state.userRequest,
-                system_prompt: state.systemPrompt,
+                user_request: userPrompt,
+                user_prompt: userPrompt,
+                system_prompt: systemPrompt,
                 workflow_graph: workflowGraph,
                 ...(extra || {}),
             },
@@ -237,7 +299,7 @@ class MovenReporter {
             const res = await this.fetchWithRetry(this.endpoint, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify(payload),
+                body: (0, safe_json_1.safeStringify)(payload),
             });
             return res.ok;
         }
@@ -264,6 +326,7 @@ class MovenReporter {
             version: state.version,
             tags: state.tags,
             user_request: state.userRequest,
+            user_prompt: state.userRequest,
             system_prompt: state.systemPrompt,
             timestamp: new Date().toISOString(),
             // Send full agent circuit breaker settings so backend can upsert them
@@ -287,7 +350,7 @@ class MovenReporter {
             const res = await this.fetchWithRetry(this.endpoint, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify(payload),
+                body: (0, safe_json_1.safeStringify)(payload),
             }, 2);
             // If backend returns updated rules, overwrite local state with cloud settings
             if (res.ok) {

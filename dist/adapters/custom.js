@@ -20,6 +20,10 @@ function wrapCustomTool(toolName, fn, options, sharedState) {
     const optsWithProvider = { provider: 'custom-sdk', ...options };
     const state = sharedState || new run_state_1.MovenRunState(optsWithProvider);
     const reporter = new reporter_1.MovenReporter(options?.apiKey, options?.endpoint);
+    // Saga: register the inline compensating action (inverse) for this tool
+    if (options?.compensate) {
+        state.registerCompensation(toolName, options.compensate);
+    }
     const wrapped = async (...args) => {
         const log = state.recordToolCall(toolName, args[0]);
         // Check heuristics before execution
@@ -36,6 +40,9 @@ function wrapCustomTool(toolName, fn, options, sharedState) {
         catch (err) {
             if (err?.name === 'MovenKillError')
                 throw err;
+            // Record the failure so the call doesn't stay in_flight forever — the
+            // rewind receipt then reflects it honestly (reached the downstream API).
+            state.recordToolResult(log, { error: err?.message || String(err) }, Date.now() - start);
             throw err;
         }
     };

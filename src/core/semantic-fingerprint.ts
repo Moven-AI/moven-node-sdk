@@ -14,6 +14,7 @@
  */
 
 import crypto from 'crypto';
+import { safeStringify } from './safe-json';
 
 // ─── Public Types ────────────────────────────────────────────────────────────
 
@@ -189,7 +190,7 @@ export class SemanticFingerprintEngine {
   public static computeIntentHash(intentText: string, toolResult?: any): string {
     const resultStr = toolResult === undefined
       ? ''
-      : typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
+      : typeof toolResult === 'string' ? toolResult : safeStringify(toolResult);
 
     const normalised = `${intentText.trim().toLowerCase()}|${resultStr.trim().toLowerCase()}`;
     return crypto.createHash('sha256').update(normalised).digest('hex').substring(0, 20);

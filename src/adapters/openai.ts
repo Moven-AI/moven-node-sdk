@@ -29,8 +29,9 @@ export function wrapOpenAIToolRunner<T extends (...args: any[]) => Promise<any>>
       await MovenKillHandler.handleTripResult(postCheck, state, reporter);
 
       return res;
-    } catch (err) {
-      if ((err as any)?.name === 'MovenKillError') throw err;
+    } catch (err: any) {
+      if (err?.name === 'MovenKillError') throw err;
+      state.recordToolResult(log, { error: err?.message || String(err) }, Date.now() - start);
       throw err;
     }
   };

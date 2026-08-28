@@ -3,6 +3,7 @@ import { HeuristicTripResult } from '../core/heuristics';
 import { MovenRunState } from '../core/run-state';
 import { MovenReporter } from '../reporter';
 import { MovenDynamicPricingEngine } from '../core/pricing';
+import { safeStringify } from '../core/safe-json';
 
 export class MovenKillHandler {
   /**
@@ -78,7 +79,9 @@ export class MovenKillHandler {
     }
 
     // 3. Auto-fallback: switch to cheaper model on first trip instead of killing (NEVER bypass for security/prompt-injections)
-    if (state.options.autoFallbackCheaperModel && !state.isFallbackActive && tripResult.heuristic !== 'prompt_injection') {
+    // HALT GATE: a halted agent (post-rewind) must NEVER auto-resume into the same loop —
+    // that is how incident #2 happens ten seconds later. Fallback is skipped and the kill path halts.
+    if (state.options.autoFallbackCheaperModel && !state.isFallbackActive && !state.halted && tripResult.heuristic !== 'prompt_injection') {
       const cheaperModel = state.switchToCheaperModel();
       console.warn(
         `\x1b[33m\x1b[1m⚡ [Moven AI] Auto-Fallback Activated:\x1b[0m \x1b[36mRouting agent '${state.agentName}' to cheaper model '${cheaperModel}' instead of terminating run.\x1b[0m`
@@ -108,9 +111,12 @@ export class MovenKillHandler {
         } catch {}
       }
 
-      // Reset repeat call tracking for clean continuation under fallback model
+      // Reset repeat call tracking for clean continuation under fallback model.
+      // The checkpoint ledger must be dropped too — stale checkpoints at old
+      // depths collide with new calls and corrupt future rewinds.
       state.toolCalls = [];
       state.depth = Math.max(0, state.depth - 2);
+      state.checkpointManager.clear();
       return { fallbackActivated: true };
     }
 
@@ -125,7 +131,16 @@ export class MovenKillHandler {
     reporter?: MovenReporter
   ): Promise<never> {
     state.isKilled = true;
-    
+    // HALT GATE: killing halts the agent. No tool call passes the interception
+    // guard again until an operator resumes / re-plans, and the offending tool
+    // goes on a cooldown so it cannot retrigger the identical loop.
+    state.halted = true;
+    state.haltReason = tripResult.reason || 'Circuit breaker tripped — awaiting operator review before resume.';
+    if (tripResult.toolName) {
+      const cooldownSeconds = state.options.rewindCooldownSeconds ?? 300;
+      state.applyCooldown(tripResult.toolName, cooldownSeconds);
+    }
+
     const error = new MovenKillError({
       runId: state.runId,
       heuristic: tripResult.heuristic || 'repeat_tool_call',
@@ -142,7 +157,7 @@ export class MovenKillHandler {
     console.error(`\x1b[31m\x1b[1m🛑 REASON:\x1b[0m ${tripResult.reason}`);
     if (tripResult.toolName) {
       console.error(`\x1b[31m\x1b[1m🛠️  OFFENDING TOOL:\x1b[0m \x1b[35m${tripResult.toolName}\x1b[0m`);
-      console.error(`\x1b[31m\x1b[1m📋 ARGUMENTS:\x1b[0m \x1b[90m${JSON.stringify(tripResult.toolArgs || {})}\x1b[0m`);
+      console.error(`\x1b[31m\x1b[1m📋 ARGUMENTS:\x1b[0m \x1b[90m${safeStringify(tripResult.toolArgs || {})}\x1b[0m`);
     }
     const metrics = tripResult.metrics || state.getMetrics();
     const activeModel = state.options.currentModel || state.getCheaperModel() || 'openai/gpt-4o-mini';

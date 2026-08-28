@@ -1,5 +1,6 @@
 import { MovenMrlEmbedder } from './mrl-embedder';
 import { SemanticCanonicalizer } from './canonicalizer';
+import { safeStringify } from '../safe-json';
 
 export interface ActionMemoryEntry {
   tool: string;
@@ -165,7 +166,7 @@ export class SemanticMemoryManager {
     } else if (typeof result === 'object' && result !== null) {
       for (const [k, v] of Object.entries(result)) {
         if (v !== undefined && v !== null && typeof v !== 'function') {
-          const vStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
+          const vStr = typeof v === 'object' ? safeStringify(v) : String(v);
           if (vStr.length < 300) {
             extracted.push(`${tool}.${k} = ${vStr}`);
           }

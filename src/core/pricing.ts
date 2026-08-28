@@ -1,3 +1,4 @@
+import { safeStringify } from './safe-json';
 /**
  * Moven AI Dynamic Model Pricing Engine
  * Powered by OpenRouter live model catalog & broker rates
@@ -38,6 +39,22 @@ const DEFAULT_PRICING_TABLE: Record<string, ModelTokenRates> = {
   'deepseek/deepseek-chat': { promptPerMillion: 0.14, completionPerMillion: 0.28, promptPerToken: 0.00000014, completionPerToken: 0.00000028 },
   'deepseek/deepseek-reasoner': { promptPerMillion: 0.55, completionPerMillion: 2.19, promptPerToken: 0.00000055, completionPerToken: 0.00000219 },
   'deepseek-chat': { promptPerMillion: 0.14, completionPerMillion: 0.28, promptPerToken: 0.00000014, completionPerToken: 0.00000028 },
+
+  // Enterprise direct providers
+  'xai/grok-2': { promptPerMillion: 2.00, completionPerMillion: 10.00, promptPerToken: 0.000002, completionPerToken: 0.00001 },
+  'xai/grok-3': { promptPerMillion: 3.00, completionPerMillion: 15.00, promptPerToken: 0.000003, completionPerToken: 0.000015 },
+  'grok-3': { promptPerMillion: 3.00, completionPerMillion: 15.00, promptPerToken: 0.000003, completionPerToken: 0.000015 },
+  'perplexity/sonar': { promptPerMillion: 1.00, completionPerMillion: 1.00, promptPerToken: 0.000001, completionPerToken: 0.000001 },
+  'sonar': { promptPerMillion: 1.00, completionPerMillion: 1.00, promptPerToken: 0.000001, completionPerToken: 0.000001 },
+  'perplexity/sonar-pro': { promptPerMillion: 3.00, completionPerMillion: 15.00, promptPerToken: 0.000003, completionPerToken: 0.000015 },
+  'moonshot/kimi-k2': { promptPerMillion: 0.60, completionPerMillion: 2.50, promptPerToken: 0.0000006, completionPerToken: 0.0000025 },
+  'moonshot-v1-8k': { promptPerMillion: 0.17, completionPerMillion: 0.17, promptPerToken: 0.00000017, completionPerToken: 0.00000017 },
+  'qwen/qwen-turbo': { promptPerMillion: 0.05, completionPerMillion: 0.20, promptPerToken: 0.00000005, completionPerToken: 0.0000002 },
+  'qwen-turbo': { promptPerMillion: 0.05, completionPerMillion: 0.20, promptPerToken: 0.00000005, completionPerToken: 0.0000002 },
+  'zhipu/glm-4-flash': { promptPerMillion: 0.00, completionPerMillion: 0.00, promptPerToken: 0, completionPerToken: 0 },
+  'glm-4-flash': { promptPerMillion: 0.00, completionPerMillion: 0.00, promptPerToken: 0, completionPerToken: 0 },
+  'yi-lightning': { promptPerMillion: 0.14, completionPerMillion: 0.14, promptPerToken: 0.00000014, completionPerToken: 0.00000014 },
+  'meta-llama/llama-3.1-8b-instruct': { promptPerMillion: 0.10, completionPerMillion: 0.25, promptPerToken: 0.0000001, completionPerToken: 0.00000025 },
 };
 
 export class MovenDynamicPricingEngine {
@@ -143,7 +160,7 @@ export class MovenDynamicPricingEngine {
   public static estimateTokens(payload: any): number {
     if (payload === undefined || payload === null) return 0;
     try {
-      const str = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      const str = typeof payload === 'string' ? payload : safeStringify(payload);
       return Math.max(Math.ceil(str.length / 4), 1);
     } catch {
       return 10;

@@ -48,25 +48,80 @@ export class MovenHeuristicsEngine {
     }
 
     // 0.6. Real-Time Prompt Injection & Jailbreak Firewall Check
-    if (opts.enablePromptInjectionFirewall !== false && state.toolCalls.length > 0) {
-      const lastCall = state.toolCalls[state.toolCalls.length - 1];
-      const inspection = MovenPromptInjectionFirewall.inspect(
-        { args: lastCall.args, reasoning: lastCall.reasoning },
-        opts.promptFirewall || {}
-      );
-      if (inspection.isAttack) {
+    if (opts.enablePromptInjectionFirewall !== false) {
+      const firewallConfig = opts.promptFirewall || {};
+
+      // 0.6a. Inspect user prompt / goal (runs on every evaluation, even before tool calls)
+      if (!state._userPromptScanned) {
+        const userInput = opts.userRequest || opts.goal || opts.userPrompt;
+        if (userInput) {
+          const promptInspection = MovenPromptInjectionFirewall.inspect(userInput, firewallConfig);
+          if (promptInspection.isAttack) {
+            return {
+              tripped: true,
+              heuristic: 'prompt_injection',
+              reason: promptInspection.reason || `[Prompt Injection Firewall] Malicious attack in user prompt (${promptInspection.attackType})`,
+              toolName: '__user_prompt__',
+              toolArgs: { userInput: typeof userInput === 'string' ? userInput.substring(0, 200) : userInput },
+              metrics: state.getMetrics(),
+            };
+          }
+          state._userPromptScanned = true;
+        }
+      }
+
+      // 0.6b. Inspect latest tool call arguments & reasoning (original behavior)
+      if (state.toolCalls.length > 0) {
+        const lastCall = state.toolCalls[state.toolCalls.length - 1];
+        const inspection = MovenPromptInjectionFirewall.inspect(
+          { args: lastCall.args, reasoning: lastCall.reasoning },
+          firewallConfig
+        );
+        if (inspection.isAttack) {
+          return {
+            tripped: true,
+            heuristic: 'prompt_injection',
+            reason: inspection.reason || `[Prompt Injection Firewall] Malicious attack pattern intercepted (${inspection.attackType})`,
+            toolName: lastCall.toolName,
+            toolArgs: lastCall.args,
+            metrics: state.getMetrics(),
+          };
+        }
+      }
+    }
+
+    // 0.7. Deterministic Hard Ceilings (Immediate Trip on Hard Limit Violations)
+    // 0.7a. Depth Ceiling (with Adaptive 95th-Percentile Baseline)
+    const maxDepth = opts.percentileStepBaseline && opts.percentileStepBaseline > (opts.maxDepth || 15)
+      ? Math.round(opts.percentileStepBaseline * 1.25)
+      : (opts.maxDepth || 15);
+
+    if (state.depth > maxDepth) {
+      return {
+        tripped: true,
+        heuristic: 'depth_ceiling',
+        reason: `Agent call depth (${state.depth}) exceeded maximum allowed recursion limit (${maxDepth}${opts.percentileStepBaseline ? ' [adaptive 95th-percentile baseline]' : ''}).`,
+        metrics: state.getMetrics(),
+      };
+    }
+
+    // 0.7b. Intelligent Cost Ceiling (Differentiates productive progress vs wasteful loops)
+    if (state.cumulativeCost >= (opts.maxCostDollar || 2.00)) {
+      const recentHashes = state.stateHashes.slice(-3);
+      const isMakingProgress = recentHashes.length >= 2 && new Set(recentHashes).size === recentHashes.length;
+      const effectiveCap = isMakingProgress ? (opts.maxCostDollar || 2.00) * 1.25 : (opts.maxCostDollar || 2.00);
+
+      if (state.cumulativeCost >= effectiveCap) {
         return {
           tripped: true,
-          heuristic: 'prompt_injection',
-          reason: inspection.reason || `[Prompt Injection Firewall] Malicious attack pattern intercepted (${inspection.attackType})`,
-          toolName: lastCall.toolName,
-          toolArgs: lastCall.args,
+          heuristic: 'cost_ceiling',
+          reason: `Cumulative token cost ($${state.cumulativeCost.toFixed(4)}) exceeded intelligent cost ceiling ($${effectiveCap.toFixed(2)}).`,
           metrics: state.getMetrics(),
         };
       }
     }
 
-    // 0.7. Semantic Fingerprint Layer (<1ms, zero-AI, catches smart loops that hash-based
+    // 0.8. Semantic Fingerprint Layer (<1ms, zero-AI, catches smart loops that hash-based
     //      checks miss: goal-state hash repeat, cosine similarity collapse, entropy stagnation)
     if (opts.semanticFingerprint?.enabled !== false && state.reasoningSteps.length >= 3) {
       const sfResult = SemanticFingerprintEngine.evaluate(
@@ -92,7 +147,7 @@ export class MovenHeuristicsEngine {
       }
     }
 
-    // 0.8. Layer 2: Semantic Guard (<0.8ms in-process hot path, tiny multi-head classifier)
+    // 0.9. Layer 2: Semantic Guard (<0.8ms in-process hot path, tiny multi-head classifier)
     if (opts.layer2?.enabled !== false && state.toolCalls.length > 0 && state.layer2Guard) {
       const lastCall = state.toolCalls[state.toolCalls.length - 1];
       const l2Result = state.layer2Guard.evaluate(
@@ -150,39 +205,6 @@ export class MovenHeuristicsEngine {
         reason: `${toolType} '${lastCall?.toolName}' called ${repeatCount} times without query novelty or state progression (limit: ${effectiveRepeatLimit}).`,
         toolName: lastCall?.toolName,
         toolArgs: lastCall?.args,
-        metrics: state.getMetrics(),
-      };
-    }
-
-    // 2. Intelligent Cost Ceiling (Differentiates productive progress vs wasteful loops)
-    if (state.cumulativeCost >= (opts.maxCostDollar || 2.00)) {
-      // Check if recent state hashes are unique (productive progress)
-      const recentHashes = state.stateHashes.slice(-3);
-      const isMakingProgress = recentHashes.length >= 2 && new Set(recentHashes).size === recentHashes.length;
-
-      // If agent is making active, non-repetitive progress, allow 25% cost headroom buffer
-      const effectiveCap = isMakingProgress ? (opts.maxCostDollar || 2.00) * 1.25 : (opts.maxCostDollar || 2.00);
-
-      if (state.cumulativeCost >= effectiveCap) {
-        return {
-          tripped: true,
-          heuristic: 'cost_ceiling',
-          reason: `Cumulative token cost ($${state.cumulativeCost.toFixed(4)}) exceeded intelligent cost ceiling ($${effectiveCap.toFixed(2)}).`,
-          metrics: state.getMetrics(),
-        };
-      }
-    }
-
-    // 3. Depth Ceiling (with Adaptive 95th-Percentile Baseline)
-    const maxDepth = opts.percentileStepBaseline && opts.percentileStepBaseline > (opts.maxDepth || 15)
-      ? Math.round(opts.percentileStepBaseline * 1.25)
-      : (opts.maxDepth || 15);
-
-    if (state.depth > maxDepth) {
-      return {
-        tripped: true,
-        heuristic: 'depth_ceiling',
-        reason: `Agent call depth (${state.depth}) exceeded maximum allowed recursion limit (${maxDepth}${opts.percentileStepBaseline ? ' [adaptive 95th-percentile baseline]' : ''}).`,
         metrics: state.getMetrics(),
       };
     }

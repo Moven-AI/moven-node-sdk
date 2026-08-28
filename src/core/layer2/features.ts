@@ -18,12 +18,15 @@ export class SemanticFeatureEngine {
     const proposedActionVector = MovenMrlEmbedder.embed(canonical.canonicalActionText, targetDim);
     const expectedResultVector = MovenMrlEmbedder.embed(canonical.canonicalExpectedResult, targetDim);
 
-    // 1. Goal Similarity
-    const goal_similarity = MovenMrlEmbedder.cosineSimilarity(
-      proposedActionVector,
-      memory.goalState.goalVector,
-      targetDim
-    );
+    // 1. Goal Similarity (default to 1.0 when no goal is provided to prevent false drift trip)
+    const hasGoal = !!(input.goal || memory.goalState.primaryGoal);
+    const goal_similarity = hasGoal
+      ? MovenMrlEmbedder.cosineSimilarity(
+          proposedActionVector,
+          memory.goalState.goalVector,
+          targetDim
+        )
+      : 1.0;
 
     // 2. Action Similarity Distribution
     let action_similarity_max = 0.0;
@@ -143,7 +146,9 @@ export class SemanticFeatureEngine {
       const sPrev = memory.stateSnapshots[memory.stateSnapshots.length - 2];
       state_change_estimate = Math.min(1.0, MovenMrlEmbedder.euclideanDistance(sLast, sPrev, targetDim));
     }
-    const goal_relevance = goal_similarity * (expected_goal_coverage_after >= goal_coverage_before ? 1.0 : 0.4);
+    const goal_relevance = hasGoal
+      ? goal_similarity * (expected_goal_coverage_after >= goal_coverage_before ? 1.0 : 0.4)
+      : 1.0;
 
     // 7. Historical Outcome Learning
     let historical_usefulness = 0.50;

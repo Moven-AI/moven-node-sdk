@@ -51,6 +51,7 @@ export interface MovenOptions {
     userId?: string;
     userEmail?: string;
     userRequest?: string;
+    userPrompt?: string;
     goal?: string;
     metadata?: Record<string, any>;
     framework?: string;
@@ -186,6 +187,8 @@ export declare class MovenRunState {
     intentHashes: string[];
     /** Latest Progress Delta cosine similarity score (0–1). Updated on each evaluate(). */
     lastSemanticSimilarity: number;
+    /** Flag: has the user prompt already been scanned by the prompt injection firewall */
+    _userPromptScanned: boolean;
     /** SRE Telemetry: Sliding window of recent call statuses (true = success, false = error) */
     recentCallOutcomes: {
         timestamp: number;

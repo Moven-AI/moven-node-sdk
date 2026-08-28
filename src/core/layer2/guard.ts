@@ -80,10 +80,11 @@ export class MovenLayer2Guard {
       this.memory.setGoal(goal);
     }
 
+    const hasGoal = !!(goal || (this.memory.hasExplicitGoal ? this.memory.goalState.primaryGoal : ''));
     const input: SemanticActionInput = {
       tool,
       arguments: args,
-      goal: goal || this.memory.goalState.primaryGoal,
+      goal: hasGoal ? (goal || this.memory.goalState.primaryGoal) : '',
       expectedOutcome,
       cost,
     };
@@ -103,6 +104,9 @@ export class MovenLayer2Guard {
 
     // 3. Predict Multi-Head Probabilities
     const { probabilities, attributions } = TinySemanticClassifier.predict(features);
+    if (!hasGoal) {
+      probabilities.p_goal_drift = 0.0;
+    }
 
     // 4. Evaluate Policy
     const elapsedUs = Math.max(1, Math.round((performance.now() - startTime) * 1000));

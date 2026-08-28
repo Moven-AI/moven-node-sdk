@@ -36,6 +36,7 @@ export class SemanticMemoryManager {
   public facts: FactMemoryEntry[] = [];
   public goalState: GoalMemoryState;
   public stateSnapshots: Float32Array[] = [];
+  public hasExplicitGoal: boolean = false;
 
   constructor(options?: { maxActions?: number; maxFacts?: number; targetDim?: number }) {
     this.maxActions = options?.maxActions ?? 32;
@@ -45,8 +46,8 @@ export class SemanticMemoryManager {
     const defaultGoal = 'Complete requested task';
     this.goalState = {
       primaryGoal: defaultGoal,
-      canonicalGoal: SemanticCanonicalizer.canonicalGoal(defaultGoal),
-      goalVector: MovenMrlEmbedder.embed(SemanticCanonicalizer.canonicalGoal(defaultGoal), this.targetDim),
+      canonicalGoal: defaultGoal,
+      goalVector: MovenMrlEmbedder.embed(defaultGoal, this.targetDim),
       subgoals: [],
       subgoalVectors: [],
       requiredItems: [],
@@ -55,6 +56,9 @@ export class SemanticMemoryManager {
   }
 
   public setGoal(goalText: string, subgoals: string[] = [], requiredItems: string[] = []): void {
+    if (!goalText || !goalText.trim()) return;
+    this.hasExplicitGoal = true;
+
     if (this.goalState && this.goalState.primaryGoal === goalText && subgoals.length === 0 && requiredItems.length === 0) {
       return;
     }

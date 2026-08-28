@@ -85,6 +85,8 @@ class MovenRunState {
     intentHashes = [];
     /** Latest Progress Delta cosine similarity score (0–1). Updated on each evaluate(). */
     lastSemanticSimilarity = 0;
+    /** Flag: has the user prompt already been scanned by the prompt injection firewall */
+    _userPromptScanned = false;
     /** SRE Telemetry: Sliding window of recent call statuses (true = success, false = error) */
     recentCallOutcomes = [];
     /** Consecutive structural schema validation failures counter */

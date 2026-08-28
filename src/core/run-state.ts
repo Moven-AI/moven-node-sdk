@@ -57,6 +57,7 @@ export interface MovenOptions {
   userId?: string; // End-user / person identifier (e.g. 'user_88241', 'srini@company.com')
   userEmail?: string; // Optional user email
   userRequest?: string; // High-level user goal or prompt driving this run
+  userPrompt?: string; // The raw user prompt text (alias for userRequest, used by prompt firewall)
   goal?: string; // Alias for userRequest
   metadata?: Record<string, any>; // Arbitrary custom metadata tags
   framework?: string; // Agent framework (e.g. 'LangGraph / LangChain', 'Vercel AI SDK')
@@ -224,6 +225,8 @@ export class MovenRunState {
   public intentHashes: string[] = [];
   /** Latest Progress Delta cosine similarity score (0–1). Updated on each evaluate(). */
   public lastSemanticSimilarity: number = 0;
+  /** Flag: has the user prompt already been scanned by the prompt injection firewall */
+  public _userPromptScanned: boolean = false;
 
   /** SRE Telemetry: Sliding window of recent call statuses (true = success, false = error) */
   public recentCallOutcomes: { timestamp: number; success: boolean; latencyMs: number; isSchemaFailure?: boolean }[] = [];

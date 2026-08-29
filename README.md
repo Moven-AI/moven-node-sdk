@@ -186,6 +186,49 @@ Every wrapped call carries a generated **idempotency key** (`mvn_<run>_<tool>_<d
 
 ---
 
+## 📈 OpenTelemetry Export (zero-dependency)
+
+Every breaker decision and guarded tool call can be emitted as an OTel span so breaker activity lands in your existing Datadog / Grafana Tempo / Honeycomb / Jaeger stack. **Off by default** — enable by setting `OTEL_EXPORTER_OTLP_ENDPOINT`, or explicitly:
+
+```typescript
+createMovenCircuitBreaker({
+  // ...policy
+  otel: { endpoint: 'https://otel-collector.internal', serviceName: 'inventory-agent' },
+});
+```
+
+If `@opentelemetry/api` is installed in your app, spans flow through its global tracer (joining your active context). Otherwise Moven exports OTLP/HTTP JSON directly — no SDK required. Spans carry `moven.decision`, `moven.heuristic`, `moven.similarity`, `moven.cost_usd`, `moven.tool`, `moven.receipt_id`, and more.
+
+---
+
+## 🧪 `moven verify` — Policy Regression Testing for CI
+
+Replay recorded tool-call traces through the real heuristic engine (dry-run — nothing executes) and fail the build when a candidate policy would kill a known-good trace:
+
+```bash
+moven verify --file traces/golden.json \
+  --max-repeat 3 --max-cost 2.00 --max-depth 15 --max-no-progress 3
+```
+
+```json
+[
+  {
+    "name": "golden:weather-multi-city",
+    "toolCalls": [
+      { "toolName": "get_weather", "args": { "city": "SF" }, "result": { "temp": "18C" } }
+    ]
+  }
+]
+```
+
+- Exit `0` — every trace survives the candidate policy.
+- Exit `1` — at least one trace would trip; the report shows exactly which call, which heuristic, and why.
+- Exit `2` — bad input.
+
+Programmatic API: `MovenVerifier.verify(traces, policy)` → report, `MovenVerifier.formatReport(report)` → CI text. Replay is a pure function of `(trace, policy)` — recorded traces are never mutated.
+
+---
+
 ## 🛠️ Supported Framework Adapters
 
 | Provider / Framework | Exported Adapter |
@@ -224,12 +267,177 @@ export const moven = createMovenCircuitBreaker({
   currentModel: 'openai/gpt-4o',
   cheaperModel: 'openai/gpt-4o-mini',
   autoFallbackCheaperModel: true,
-  enableLlmJudgeArbitrator: true,
 
   apiKey: process.env.MOVEN_API_KEY,
   endpoint: 'https://api.moven.dev/events',
 });
 ```
+
+---
+
+## 🏭 Production & Observability
+
+Moven is built for enterprise agent fleets. The breaker protects the agent
+in-process; the following features keep the SDK itself safe, observable and
+quiet in production.
+
+### Leveled, pluggable logging
+
+All SDK output flows through `MovenLogger` — no raw `console` noise. Levels:
+`silent < error < warn < info < debug`. The default is `warn` under
+`NODE_ENV=production` and `info` otherwise.
+
+```typescript
+import { MovenLogger } from 'moven-sdk';
+
+MovenLogger.setLevel('error');                      // quiet in prod
+MovenLogger.setJsonMode(true);                      // one JSON line per event
+
+MovenLogger.setTransport((level, message, fields) => {
+  winston.log(level, message, fields);              // pino / winston / Datadog
+});
+```
+
+Environment overrides: `MOVEN_LOG_LEVEL=silent|error|warn|info|debug` and
+`MOVEN_LOG_FORMAT=json`. A broken transport can never crash the hot path.
+
+### Bounded memory retention
+
+Long-lived runs cannot grow without limit. The tool-call ledger (default
+500 entries), prompt history (200) and inference-hash windows are pruned to
+the newest entries while every detection window stays intact:
+
+```typescript
+createMovenCircuitBreaker({ maxToolCallHistory: 1000, maxPromptHistory: 500 });
+```
+
+### Fail-safe heuristics
+
+Every sub-detector (burn guard, hallucination, firewall, semantic fingerprint,
+Layer 2, adaptive loop, custom rules) is isolated: an internal error is logged
+and that detector fail-opens, while the deterministic hard ceilings (cost,
+depth) keep enforcing. A throwing `customCheck` can never take down your tool.
+
+### Idempotent kill (single-flight)
+
+Concurrent tool executions that trip the breaker in the same tick produce
+exactly one set of kill side effects (banner, `onKill`, cooldown, kill event)
+while every concurrent caller still receives its own `MovenKillError`.
+
+### Telemetry self-protection
+
+If the Moven backend is unreachable, the reporter stops retrying after 5
+consecutive failures and fail-fasts outbound telemetry for 60 seconds — no
+retry storms, no hot-path latency. In-process breaker protection is never
+affected:
+
+```typescript
+createMovenCircuitBreaker({
+  telemetryFailureThreshold: 5,   // failures before telemetry pauses
+  telemetryCooldownMs: 60_000,    // pause duration
+});
+```
+
+### Defensive option validation
+
+Invalid thresholds (`maxDepth: -1`, `maxCostDollar: NaN`, …) are clamped into
+safe ranges at construction and on every dynamic policy update, with a
+rate-limited warning so misconfigurations are visible.
+
+---
+
+## 🔁 Works with ANY SDK — pre-trip model warnings
+
+The breaker's **self-correction tier** is framework-agnostic. When a repeat
+pattern is **one call away** from tripping, the breaker queues a warning; you
+inject it into the next model invocation so the LLM can change strategy
+*before* the kill executes.
+
+### Universal surface (OpenAI SDK, Anthropic, CrewAI, AutoGen, LlamaIndex, raw loops)
+
+```typescript
+import { createMovenCircuitBreaker } from 'moven-sdk';
+
+const breaker = createMovenCircuitBreaker({
+  agentName: 'research-agent',
+  maxRepeatCalls: 3,
+  warnBeforeTrip: true,            // queue warnings before killing (default: true)
+  enableUserIntentAttestation: true,
+});
+
+const tools = breaker.wrapTools({ search_web, fetch_page }).tools;
+
+// In your model loop — EVERY framework accepts this message shape:
+for (const step of steps) {
+  const messages = breaker.warnModel([                      // ← appends + drains
+    ...history,
+    { role: 'user', content: step.prompt },
+  ]);
+  const res = await openai.chat.completions.create({ model: 'gpt-4o', messages });
+  // …execute tool calls through the wrapped tools…
+}
+```
+
+The injected system message looks like:
+
+```
+[MOVEN CIRCUIT BREAKER WARNING] You have called the tool 'search_web' 2 times
+with near-identical arguments and no state progression. The Moven circuit
+breaker will HALT execution if you call it again without changing your
+approach. Either vary the arguments meaningfully, use a different tool, or
+summarize what you have and move on.
+```
+
+`warnModel()` is pure (never mutates your array), drains exactly once, and is
+a no-op passthrough when nothing is queued.
+
+### LangGraph / LangChain one-liner
+
+```typescript
+import { createMovenLangGraphGuard } from 'moven-sdk';
+import { ChatOpenAI } from '@langchain/openai';
+
+const guard = createMovenLangGraphGuard({ agentName: 'research-agent', maxRepeatCalls: 3 });
+
+const llm = guard.wrapModel(new ChatOpenAI({ model: 'gpt-4o' }));  // auto-injects warnings on .invoke/.stream/.bindTools
+const tools = guard.wrapTools({ search_web, fetch_page }).tools;   // interception + kill
+```
+
+---
+
+## 🧠 User-Intent Attestation (knows when NOT to trip)
+
+A breaker that only counts repetitions destroys legitimate work. Moven
+distinguishes **agent-initiated loops** (trip — this is where the money is
+saved) from **human-directed repetition** (allowed — the user explicitly
+asked for it):
+
+```typescript
+// Ongoing conversation: "search tesla revenue" → "search it again" → …
+// Every NEW user message in an ongoing conversation re-attests the window,
+// and the agent's repeated searches are recognized as human-directed work.
+const moven = createMovenCircuitBreaker({
+  maxRepeatCalls: 5,
+  humanAttestationWindowMs: 300_000,      // how long a user message attests
+  maxHumanAttestedStagnantSteps: 12,      // waste backstop (see below)
+});
+
+// Programmatic API for custom loops:
+state.recordUserInstruction('run the report 10 times');
+```
+
+The contract:
+
+| Signal | Behavior |
+|---|---|
+| Agent repeats identical call on its own | **Trips** (repeat / no-progress / semantic / layer2) |
+| New user message in an ongoing conversation | Following calls attested → loop heuristics relaxed |
+| Attested calls return byte-identical results N times | **Trips** `user_directed_ceiling` — even the user's patience has limits |
+| Attested calls return *progressing* results | Always allowed — that is real work |
+| Hard ceilings (cost / depth / burn guard / SRE) | **Never** relaxed by attestation |
+
+The initial task prompt does not attest — Layer 2 stays armed for
+agent-initiated redundancy inside the first turn.
 
 ---
 

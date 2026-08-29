@@ -122,6 +122,17 @@ function shannonEntropy(tokens: string[]): number {
 
 // ─── Main Engine ─────────────────────────────────────────────────────────────
 
+export interface SemanticFingerprintFlags {
+  /**
+   * Skip the goal-state-hash sub-check for this evaluation. Set when the
+   * latest call is an actively-progressing poll (whitelisted polling tool
+   * whose result state is changing or still inside its TTL) — a legitimate
+   * poll repeating the same (intent, result) state must not trip the loop
+   * detector.
+   */
+  skipGoalStateHash?: boolean;
+}
+
 export class SemanticFingerprintEngine {
   /**
    * Evaluate the full semantic fingerprint suite against the current reasoning window.
@@ -134,6 +145,7 @@ export class SemanticFingerprintEngine {
     reasoningSteps: string[],
     intentHashes: string[],
     options?: SemanticFingerprintOptions,
+    flags?: SemanticFingerprintFlags,
   ): SemanticFingerprintResult {
     if (options?.enabled === false) return { tripped: false };
 
@@ -152,12 +164,14 @@ export class SemanticFingerprintEngine {
     const hashWindow = intentHashes.slice(-windowSize);
 
     // ── Sub-check 1: Goal-State Hash Repeat ──────────────────────────────
-    const hashRepeat = SemanticFingerprintEngine._checkGoalStateHash(hashWindow);
-    if (hashRepeat.tripped) {
-      return {
-        ...hashRepeat,
-        latencyUs: Number(process.hrtime.bigint() - t0) / 1000,
-      };
+    if (flags?.skipGoalStateHash !== true) {
+      const hashRepeat = SemanticFingerprintEngine._checkGoalStateHash(hashWindow);
+      if (hashRepeat.tripped) {
+        return {
+          ...hashRepeat,
+          latencyUs: Number(process.hrtime.bigint() - t0) / 1000,
+        };
+      }
     }
 
     // ── Sub-check 2: Cosine Similarity Progress Delta ─────────────────────

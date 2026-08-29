@@ -1,9 +1,13 @@
 import { MovenRunState } from './run-state';
 
 export interface BurnGuardOptions {
-  maxHourlySpendDollar?: number;       // default: $10.00/hour
+  maxHourlySpendDollar?: number;       // default: $10.00/hour (rolling 60-minute window, per run)
   maxRunDurationMinutes?: number;      // default: 60 minutes max wall-clock duration
-  maxOvernightTotalDollar?: number;    // default: $25.00 hard cap overnight (12am-8am)
+  maxOvernightTotalDollar?: number;    // default: $25.00 hard cap overnight
+  /** Local hour the overnight quiet window starts (inclusive). Default: 0 (12 AM) */
+  overnightWindowStartHour?: number;
+  /** Local hour the overnight quiet window ends (exclusive). Default: 8 (8 AM) */
+  overnightWindowEndHour?: number;
   stagnationTimeoutSeconds?: number;   // default: 300 seconds (5 min) without step activity
   emergencySlackWebhook?: string;
   emergencySmsPhone?: string;
@@ -17,7 +21,28 @@ export interface BurnGuardCheckResult {
 }
 
 export class MovenOvernightBurnGuard {
-  private static hourlySpendWindow: { timestamp: number; cost: number }[] = [];
+  /**
+   * Records a spend event into the run's rolling 60-minute velocity window.
+   * Scoped to the given MovenRunState — spend from other runs in the same
+   * process never contaminates this run's velocity math (and never
+   * double-counts, because evaluate() sums ONLY this window).
+   * Wired automatically by MovenRunState.addCost / recordStepTokens /
+   * recordToolCall — call directly only for custom spend accounting.
+   */
+  public static recordSpend(state: MovenRunState, cost: number) {
+    if (cost > 0) {
+      state.hourlySpendWindow.push({ timestamp: Date.now(), cost });
+      // Bounded window: one entry per spend event; prune lazily on evaluate.
+      if (state.hourlySpendWindow.length > 10000) {
+        this.pruneWindow(state);
+      }
+    }
+  }
+
+  private static pruneWindow(state: MovenRunState) {
+    const windowStart = Date.now() - 60 * 60 * 1000;
+    state.hourlySpendWindow = state.hourlySpendWindow.filter(w => w.timestamp >= windowStart);
+  }
 
   public static evaluate(state: MovenRunState): BurnGuardCheckResult {
     const opts: BurnGuardOptions = state.options.burnGuard || {};
@@ -53,25 +78,29 @@ export class MovenOvernightBurnGuard {
       }
     }
 
-    // 3. Hourly Spend Velocity Cap (Rolling 60-minute window)
-    // Clean old window records older than 60 minutes
-    const windowStart = now - 60 * 60 * 1000;
-    this.hourlySpendWindow = this.hourlySpendWindow.filter(w => w.timestamp >= windowStart);
-    
-    // Add current run's cost to window sum
-    const totalHourlySpend = this.hourlySpendWindow.reduce((acc, w) => acc + w.cost, 0) + state.cumulativeCost;
+    // 3. Hourly Spend Velocity Cap (rolling 60-minute window, per run)
+    this.pruneWindow(state);
+    const windowSum = state.hourlySpendWindow.reduce((acc, w) => acc + w.cost, 0);
+    // Legacy fallback: runs whose spend never flowed through recordSpend
+    // (e.g. external cost tracking) still get a velocity check against the
+    // cumulative total.
+    const hourlySpend = state.hourlySpendWindow.length > 0 ? windowSum : state.cumulativeCost;
 
-    if (totalHourlySpend >= maxHourly) {
+    if (hourlySpend >= maxHourly) {
       return {
         tripped: true,
         guardType: 'hourly_velocity_exceeded',
-        reason: `[Overnight Burn Guard] Rolling 60-minute spend ($${totalHourlySpend.toFixed(2)}) exceeded max hourly velocity ceiling ($${maxHourly.toFixed(2)}/hr). Run force-killed.`,
+        reason: `[Overnight Burn Guard] Rolling 60-minute spend ($${hourlySpend.toFixed(2)}) exceeded max hourly velocity ceiling ($${maxHourly.toFixed(2)}/hr). Run force-killed.`,
       };
     }
 
-    // 4. Overnight Hard Cap (12 AM to 8 AM local time)
+    // 4. Overnight Hard Cap (quiet hours in server-local time, configurable)
+    const startHour = opts.overnightWindowStartHour ?? 0;
+    const endHour = opts.overnightWindowEndHour ?? 8;
     const localHour = new Date().getHours();
-    const isOvernight = localHour >= 0 && localHour < 8;
+    const isOvernight = startHour <= endHour
+      ? localHour >= startHour && localHour < endHour
+      : localHour >= startHour || localHour < endHour; // window wrapping midnight
     if (isOvernight && state.cumulativeCost >= maxOvernight) {
       return {
         tripped: true,
@@ -81,11 +110,5 @@ export class MovenOvernightBurnGuard {
     }
 
     return { tripped: false };
-  }
-
-  public static recordSpend(cost: number) {
-    if (cost > 0) {
-      this.hourlySpendWindow.push({ timestamp: Date.now(), cost });
-    }
   }
 }

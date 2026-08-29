@@ -6,8 +6,11 @@ export interface MovenReporterOptions {
     endpoint?: string;
     maxRetries?: number;
     timeoutMs?: number;
-    batchIntervalMs?: number;
     zeroDataRetention?: boolean;
+    /** Consecutive transport failures before telemetry itself opens a cooldown (default: 5) */
+    telemetryFailureThreshold?: number;
+    /** Cooldown (ms) while telemetry is offline — events fail fast with zero network cost (default: 60_000) */
+    telemetryCooldownMs?: number;
 }
 export declare class MovenReporter {
     private apiKey?;
@@ -15,18 +18,16 @@ export declare class MovenReporter {
     private maxRetries;
     private timeoutMs;
     private zeroDataRetention;
+    private telemetryBreaker;
     constructor(apiKeyOrOptions?: string | MovenReporterOptions, endpoint?: string);
+    /**
+     * Zero-Trust outbound path: EVERY telemetry payload is sanitized through
+     * the PII/secret redactor before it leaves the process — prompts, tool
+     * args, checkpoints and receipts included.
+     */
+    private postEvent;
     sendPayload(payload: any): Promise<boolean>;
     private fetchWithRetry;
-    queryJudgeArbitrator(state: MovenRunState): Promise<{
-        judgeModel: string;
-        cheaperModel: string;
-        pricing?: {
-            promptPerMillion: number;
-            completionPerMillion: number;
-        };
-        reason?: string;
-    } | null>;
     reportKillEvent(error: MovenKillError, state: MovenRunState): Promise<boolean>;
     /**
      * Persists a rewind receipt to api.moven.dev → `rewind_receipts` +

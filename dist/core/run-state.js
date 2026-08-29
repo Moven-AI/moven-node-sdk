@@ -7,10 +7,16 @@ exports.MovenRunState = exports.DEFAULT_CHEAPER_MODEL_MAP = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 const errors_1 = require("./errors");
 const safe_json_1 = require("./safe-json");
+const burn_guard_1 = require("./burn-guard");
 const checkpoint_1 = require("./checkpoint");
 const semantic_fingerprint_1 = require("./semantic-fingerprint");
 const pricing_1 = require("./pricing");
 const layer2_1 = require("./layer2");
+const otel_1 = require("../otel");
+const option_validation_1 = require("./option-validation");
+const intent_classifier_1 = require("./intent-classifier");
+const adaptive_loop_1 = require("./adaptive-loop");
+const logger_1 = require("./logger");
 exports.DEFAULT_CHEAPER_MODEL_MAP = {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-3-haiku-20240307',
@@ -99,6 +105,30 @@ class MovenRunState {
     layer2Guard;
     /** Latest Layer 2 decision result */
     lastLayer2Result;
+    /**
+     * Per-run rolling hourly spend window (timestamp, cost) used by the
+     * Overnight Burn Guard's velocity check. Scoped to THIS run — no
+     * cross-run contamination from static shared state.
+     */
+    hourlySpendWindow = [];
+    /**
+     * Grace steps granted after an auto-fallback switch: loop-detection
+     * heuristics (repeat / no-progress / semantic / layer2) are suppressed
+     * for this many tool calls so the cheaper model gets a fair chance to
+     * show progress. Hard limits (cost, depth, burn guard, firewall,
+     * hallucination, SRE) stay active the whole time.
+     */
+    fallbackGraceSteps = 0;
+    /** Epoch ms until which tool calls are attested as human-directed. */
+    humanAttestUntil = 0;
+    /**
+     * The ACTIVE attestation produced by the instruction-intent classifier:
+     * confidence, extracted repetition budget, and topic terms used to match
+     * the directive to the tool calls it actually applies to.
+     */
+    attestation;
+    /** Pre-trip warnings waiting to be injected into the next model call. */
+    pendingWarnings = [];
     // ─── IN-PROCESS ORCHESTRATION STATE (rewindable — Mechanism 1) ───────────
     /** Agent context / plan. Deep-copied into every checkpoint; restored on rewind. */
     context = {};
@@ -118,16 +148,27 @@ class MovenRunState {
     compensations = new checkpoint_1.MovenCompensationRegistry();
     /** Ctrl+Z checkpoint ledger (bounded retention) */
     checkpointManager;
+    /**
+     * Single-flight kill guard: guarantees the kill side-effects (banner,
+     * onKill callback, cooldown, kill event) run EXACTLY once even when
+     * concurrent tool executions trip the breaker in the same tick.
+     */
+    killInitiated = false;
     constructor(options = {}) {
-        this.options = {
+        // Enterprise hardening: clamp invalid thresholds (NaN/negative/zero) into
+        // safe ranges BEFORE defaults merge — a misconfigured limit must never
+        // silently disable a safety ceiling.
+        this.options = (0, option_validation_1.validateAndClampOptions)({
             maxRepeatCalls: 5,
             repeatTimeWindowMs: 60000,
             maxCostDollar: 2.00,
             maxDepth: 15,
             maxNoProgressTurns: 3,
+            maxToolCallHistory: 500,
+            maxPromptHistory: 200,
             judgeModel: options.judgeModel || 'google/gemini-2.5-flash-lite',
+            fallbackModel: options.fallbackModel || options.judgeModel || 'google/gemini-2.5-flash-lite',
             autoFallbackCheaperModel: options.autoFallbackCheaperModel ?? true,
-            enableLlmJudgeArbitrator: options.enableLlmJudgeArbitrator ?? true,
             maxErrorRatePct: options.maxErrorRatePct ?? 50.00,
             maxSlowCallLatencyMs: options.maxSlowCallLatencyMs ?? 30000,
             maxSlowCallRatePct: options.maxSlowCallRatePct ?? 40.00,
@@ -138,7 +179,7 @@ class MovenRunState {
             slidingWindowRequests: options.slidingWindowRequests ?? 20,
             agentName: 'agent-run',
             ...options,
-        };
+        });
         this.runId = options.runId || `run_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
         // Strict lowercase kebab-case slug format
         const rawSlug = (this.options.agentId || this.options.agentName || 'default-agent')
@@ -156,6 +197,12 @@ class MovenRunState {
         this.activeModel = this.options.model || this.options.currentModel || 'openai/gpt-4o-mini';
         // Initialize Layer 2 Semantic Guard
         this.layer2Guard = new layer2_1.MovenLayer2Guard(this.agentId, this.options.layer2);
+        // OTel export: auto-enabled via OTEL_EXPORTER_OTLP_ENDPOINT (see otel.ts).
+        // Only (re)configure when the caller supplied options — manual
+        // MovenOtelExporter.configure() calls elsewhere are preserved.
+        if (this.options.otel) {
+            otel_1.MovenOtelExporter.configure(this.options.otel);
+        }
         // Bounded checkpoint ledger + compensation registry (saga pattern)
         this.checkpointManager = new checkpoint_1.MovenCheckpointManager(this.options.maxCheckpoints ?? 50);
         if (options.compensations) {
@@ -169,6 +216,12 @@ class MovenRunState {
         if (req) {
             this.userRequest = req;
             this.layer2Guard.memory.setGoal(this.userRequest);
+            // NOTE: the INITIAL task prompt deliberately does NOT open an
+            // attestation window — a first-turn instruction is the agent's job
+            // description, not a license for unlimited repetition. Layer 2 and
+            // loop heuristics must stay armed for agent-initiated redundancy
+            // inside that first turn. Only MID-RUN user messages (or explicit
+            // recordUserInstruction calls) attest.
         }
         if (options.metadata?.system_prompt || options.metadata?.systemPrompt) {
             this.systemPrompt = options.metadata.system_prompt || options.metadata.systemPrompt;
@@ -183,7 +236,117 @@ class MovenRunState {
         this.recordPrompt(prompt, 'system');
     }
     recordPrompt(content, role = 'user') {
+        // Mid-run user messages flow through the intent classifier: only a
+        // message that actually LICENSES repetition ("search it 5 times", "do
+        // it again", "poll until done") opens an attestation window — a plain
+        // follow-up question ("what's their PE ratio?") must not disarm loop
+        // detection. A negation ("stop searching") revokes the attestation.
+        if (role === 'user') {
+            this.recordUserInstruction(content);
+            return;
+        }
         this.prompts.push({ role, content, timestamp: Date.now() });
+        this.prunePrompts();
+    }
+    /**
+     * Registers a human instruction through the instruction-intent classifier.
+     * The message is classified (lexicon features → weighted score → budget
+     * extraction → topic attribution); only affirmative repetition directives
+     * open an attestation window, and the resulting profile determines WHICH
+     * calls are attested and with what stagnation budget.
+     */
+    recordUserInstruction(instruction) {
+        // Enterprise control: the "Allow Repeat Tool Calls If User Asks" console
+        // setting maps to this flag. When disabled, the breaker treats
+        // user-directed repeats like any other loop (strictest posture).
+        if (this.options.enableUserIntentAttestation === false)
+            return;
+        this.prompts.push({ role: 'user', content: instruction, timestamp: Date.now() });
+        this.prunePrompts();
+        const threshold = this.options.intentDirectiveThreshold ?? 0.5;
+        const cls = intent_classifier_1.MovenInstructionClassifier.classify(instruction, threshold);
+        if (cls.isRepetitionDirective) {
+            this.humanAttestUntil = Date.now() + (this.options.humanAttestationWindowMs ?? 300_000);
+            this.attestation = {
+                until: this.humanAttestUntil,
+                confidence: cls.confidence,
+                kind: cls.kind,
+                repetitionAllowance: cls.maxRepetitions,
+                topicTerms: cls.topicTerms,
+                general: cls.topicTerms.length === 0,
+            };
+            logger_1.MovenLogger.debug('Repetition directive attested', {
+                kind: cls.kind,
+                confidence: cls.confidence,
+                budget: cls.maxRepetitions,
+                topics: cls.topicTerms,
+            });
+        }
+        else {
+            // Non-directive (or negation): revoke any active attestation.
+            this.humanAttestUntil = 0;
+            this.attestation = undefined;
+        }
+    }
+    prunePrompts() {
+        const maxPrompts = this.options.maxPromptHistory ?? 200;
+        if (this.prompts.length > maxPrompts) {
+            this.prompts.splice(0, this.prompts.length - maxPrompts);
+        }
+    }
+    /** The active attestation profile, or undefined when none/expired. */
+    getActiveAttestation() {
+        const att = this.attestation;
+        if (!att || Date.now() > att.until)
+            return undefined;
+        return att;
+    }
+    /**
+     * Queues a pre-trip warning for the model. Deduplicated per
+     * (heuristic, toolName, argsHash) within a 60s window so the same nudge is
+     * never injected twice; bounded to the 5 most recent warnings.
+     */
+    pushWarning(w) {
+        const now = Date.now();
+        const dedupKey = `${w.heuristic}|${w.toolName || ''}|${w.argsHash || ''}`;
+        this.pendingWarnings = this.pendingWarnings.filter((existing) => {
+            const expired = now - existing.createdAt > 60_000;
+            const duplicate = `${existing.heuristic}|${existing.toolName || ''}|${existing.argsHash || ''}` === dedupKey;
+            return !expired && !duplicate;
+        });
+        this.pendingWarnings.push({
+            ...w,
+            id: `warn_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+            createdAt: now,
+        });
+        if (this.pendingWarnings.length > 5) {
+            this.pendingWarnings.splice(0, this.pendingWarnings.length - 5);
+        }
+    }
+    /** Drains all pending warnings (for injection into the next model call). */
+    drainWarnings() {
+        const drained = this.pendingWarnings;
+        this.pendingWarnings = [];
+        return drained;
+    }
+    /** Warnings currently queued (non-destructive peek, for dashboards/tests). */
+    peekWarnings() {
+        return [...this.pendingWarnings];
+    }
+    /**
+     * Decides whether a specific tool call is covered by the active
+     * attestation. A directive WITH topic terms ("poll the build") only
+     * attests calls whose tool name/args match those terms; a general
+     * directive ("do it again") attests the current call pattern as a whole.
+     */
+    isCallAttested(toolName, args) {
+        const att = this.getActiveAttestation();
+        if (!att)
+            return false;
+        if (att.general)
+            return true;
+        const callTerms = (0, intent_classifier_1.extractCallTerms)(toolName, args, (a) => adaptive_loop_1.MovenAdaptiveLoopEngine.extractQueryString(a));
+        return (0, intent_classifier_1.termOverlap)(att.topicTerms, callTerms) >= 0.15;
     }
     getModel() {
         return this.activeModel;
@@ -212,58 +375,63 @@ class MovenRunState {
         return false;
     }
     updateOptions(newRules) {
-        if (newRules.maxRepeatCalls !== undefined)
-            this.options.maxRepeatCalls = newRules.maxRepeatCalls;
-        if (newRules.maxCostDollar !== undefined)
-            this.options.maxCostDollar = newRules.maxCostDollar;
-        if (newRules.maxDepth !== undefined)
-            this.options.maxDepth = newRules.maxDepth;
-        if (newRules.maxNoProgressTurns !== undefined)
-            this.options.maxNoProgressTurns = newRules.maxNoProgressTurns;
-        if (newRules.cheaperModel !== undefined)
-            this.options.cheaperModel = newRules.cheaperModel;
-        if (newRules.autoFallbackCheaperModel !== undefined)
-            this.options.autoFallbackCheaperModel = newRules.autoFallbackCheaperModel;
-        if (newRules.enableLlmJudgeArbitrator !== undefined)
-            this.options.enableLlmJudgeArbitrator = newRules.enableLlmJudgeArbitrator;
-        if (newRules.enableSemanticCache !== undefined)
-            this.options.enableSemanticCache = newRules.enableSemanticCache;
-        if (newRules.semanticCache !== undefined)
-            this.options.semanticCache = { ...this.options.semanticCache, ...newRules.semanticCache };
-        if (newRules.semanticFingerprint !== undefined)
-            this.options.semanticFingerprint = { ...this.options.semanticFingerprint, ...newRules.semanticFingerprint };
-        if (newRules.maxErrorRatePct !== undefined)
-            this.options.maxErrorRatePct = newRules.maxErrorRatePct;
-        if (newRules.maxSlowCallLatencyMs !== undefined)
-            this.options.maxSlowCallLatencyMs = newRules.maxSlowCallLatencyMs;
-        if (newRules.maxSlowCallRatePct !== undefined)
-            this.options.maxSlowCallRatePct = newRules.maxSlowCallRatePct;
-        if (newRules.maxSchemaValidationFailures !== undefined)
-            this.options.maxSchemaValidationFailures = newRules.maxSchemaValidationFailures;
-        if (newRules.maxTokensPerStep !== undefined)
-            this.options.maxTokensPerStep = newRules.maxTokensPerStep;
-        if (newRules.enableStructuralValidation !== undefined)
-            this.options.enableStructuralValidation = newRules.enableStructuralValidation;
-        if (newRules.enableGlobalBackoff !== undefined)
-            this.options.enableGlobalBackoff = newRules.enableGlobalBackoff;
-        if (newRules.slidingWindowRequests !== undefined)
-            this.options.slidingWindowRequests = newRules.slidingWindowRequests;
-        if (newRules.safeToRetryTools !== undefined)
-            this.options.safeToRetryTools = newRules.safeToRetryTools;
-        if (newRules.pollingTtlSeconds !== undefined)
-            this.options.pollingTtlSeconds = newRules.pollingTtlSeconds;
-        if (newRules.readOnlyTools !== undefined)
-            this.options.readOnlyTools = newRules.readOnlyTools;
-        if (newRules.dryRun !== undefined)
-            this.options.dryRun = newRules.dryRun;
-        if (newRules.pauseOnTrip !== undefined)
-            this.options.pauseOnTrip = newRules.pauseOnTrip;
-        if (newRules.percentileStepBaseline !== undefined)
-            this.options.percentileStepBaseline = newRules.percentileStepBaseline;
-        if (newRules.promptFirewall !== undefined)
-            this.options.promptFirewall = { ...this.options.promptFirewall, ...newRules.promptFirewall };
-        if (newRules.layer2 !== undefined)
-            this.options.layer2 = { ...this.options.layer2, ...newRules.layer2 };
+        // Same enterprise clamping as the constructor — dynamic policy updates
+        // from the cloud can never inject an invalid threshold either.
+        const clamped = (0, option_validation_1.validateAndClampOptions)(newRules);
+        if (clamped.maxRepeatCalls !== undefined)
+            this.options.maxRepeatCalls = clamped.maxRepeatCalls;
+        if (clamped.maxCostDollar !== undefined)
+            this.options.maxCostDollar = clamped.maxCostDollar;
+        if (clamped.maxDepth !== undefined)
+            this.options.maxDepth = clamped.maxDepth;
+        if (clamped.maxNoProgressTurns !== undefined)
+            this.options.maxNoProgressTurns = clamped.maxNoProgressTurns;
+        if (clamped.cheaperModel !== undefined)
+            this.options.cheaperModel = clamped.cheaperModel;
+        if (clamped.fallbackModel !== undefined)
+            this.options.fallbackModel = clamped.fallbackModel;
+        if (clamped.autoFallbackCheaperModel !== undefined)
+            this.options.autoFallbackCheaperModel = clamped.autoFallbackCheaperModel;
+        if (clamped.softCostCeiling !== undefined)
+            this.options.softCostCeiling = clamped.softCostCeiling;
+        if (clamped.enableSemanticCache !== undefined)
+            this.options.enableSemanticCache = clamped.enableSemanticCache;
+        if (clamped.semanticCache !== undefined)
+            this.options.semanticCache = { ...this.options.semanticCache, ...clamped.semanticCache };
+        if (clamped.semanticFingerprint !== undefined)
+            this.options.semanticFingerprint = { ...this.options.semanticFingerprint, ...clamped.semanticFingerprint };
+        if (clamped.maxErrorRatePct !== undefined)
+            this.options.maxErrorRatePct = clamped.maxErrorRatePct;
+        if (clamped.maxSlowCallLatencyMs !== undefined)
+            this.options.maxSlowCallLatencyMs = clamped.maxSlowCallLatencyMs;
+        if (clamped.maxSlowCallRatePct !== undefined)
+            this.options.maxSlowCallRatePct = clamped.maxSlowCallRatePct;
+        if (clamped.maxSchemaValidationFailures !== undefined)
+            this.options.maxSchemaValidationFailures = clamped.maxSchemaValidationFailures;
+        if (clamped.maxTokensPerStep !== undefined)
+            this.options.maxTokensPerStep = clamped.maxTokensPerStep;
+        if (clamped.enableStructuralValidation !== undefined)
+            this.options.enableStructuralValidation = clamped.enableStructuralValidation;
+        if (clamped.enableGlobalBackoff !== undefined)
+            this.options.enableGlobalBackoff = clamped.enableGlobalBackoff;
+        if (clamped.slidingWindowRequests !== undefined)
+            this.options.slidingWindowRequests = clamped.slidingWindowRequests;
+        if (clamped.safeToRetryTools !== undefined)
+            this.options.safeToRetryTools = clamped.safeToRetryTools;
+        if (clamped.pollingTtlSeconds !== undefined)
+            this.options.pollingTtlSeconds = clamped.pollingTtlSeconds;
+        if (clamped.readOnlyTools !== undefined)
+            this.options.readOnlyTools = clamped.readOnlyTools;
+        if (clamped.dryRun !== undefined)
+            this.options.dryRun = clamped.dryRun;
+        if (clamped.pauseOnTrip !== undefined)
+            this.options.pauseOnTrip = clamped.pauseOnTrip;
+        if (clamped.percentileStepBaseline !== undefined)
+            this.options.percentileStepBaseline = clamped.percentileStepBaseline;
+        if (clamped.promptFirewall !== undefined)
+            this.options.promptFirewall = { ...this.options.promptFirewall, ...clamped.promptFirewall };
+        if (clamped.layer2 !== undefined)
+            this.options.layer2 = { ...this.options.layer2, ...clamped.layer2 };
     }
     getCheaperModel(providerOrModel) {
         // 1. If user explicitly set cheaperModel, always use that
@@ -293,14 +461,15 @@ class MovenRunState {
             (bareCurrentModel && exports.DEFAULT_CHEAPER_MODEL_MAP[bareCurrentModel]) ||
             '';
         // 5. Build the final model ID based on the routing layer
+        const fallbackJudgeModel = this.options.fallbackModel || this.options.judgeModel || 'google/gemini-2.5-flash-lite';
         if (routingLayer === 'openrouter') {
             // OpenRouter needs full "author/model" slugs
             if (cheaperBare) {
                 // If cheaperBare already contains a slash it's already namespaced
                 return cheaperBare.includes('/') ? cheaperBare : `${author}/${cheaperBare}`;
             }
-            // Fallback to judge model on OpenRouter
-            return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
+            // Fallback to the configured fallback model on OpenRouter
+            return fallbackJudgeModel;
         }
         // 6. Native provider SDK (openai, anthropic, google, groq, mistral, cohere…)
         //    needs BARE model IDs — strip any "author/" prefix
@@ -313,7 +482,7 @@ class MovenRunState {
             return providerFallback.includes('/') ? providerFallback.split('/').slice(1).join('/') : providerFallback;
         }
         // Absolute fallback
-        return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
+        return this.options.fallbackModel || this.options.judgeModel || 'google/gemini-2.5-flash-lite';
     }
     isSafeToRetryTool(toolName) {
         const list = this.options.safeToRetryTools || [
@@ -364,6 +533,21 @@ class MovenRunState {
             });
         }
     }
+    /**
+     * Single-flight kill guard. Returns true exactly once per run — concurrent
+     * trippers get false and must skip duplicate side effects (banner, onKill,
+     * cooldown, kill event) while still throwing their own MovenKillError.
+     */
+    markKillInitiated() {
+        if (this.killInitiated)
+            return false;
+        this.killInitiated = true;
+        return true;
+    }
+    /** True once any kill path has begun for this run (single-flight guard). */
+    isKillInitiated() {
+        return this.killInitiated;
+    }
     recordToolCall(toolName, args) {
         const argsHash = this.hashArguments(toolName, args);
         // In-process interception BEFORE anything can leave the process
@@ -386,6 +570,7 @@ class MovenRunState {
         idempotencyKey = typeof idempotencyKey === 'string' ? idempotencyKey : undefined;
         const isPollingTool = this.isSafeToRetryTool(toolName);
         const isReadOnly = this.isReadOnlyTool(toolName);
+        const humanAttested = this.isCallAttested(toolName, args);
         this.depth += 1;
         // 1. Calculate actual / estimated tokens for this step
         const promptTokens = Math.max(pricing_1.MovenDynamicPricingEngine.estimateTokens(args) +
@@ -411,16 +596,29 @@ class MovenRunState {
             depth: this.depth,
             isPollingTool,
             isReadOnly,
+            humanAttested,
             promptTokens,
             completionTokens,
             tokens: costData.totalTokens,
             cost: costData.stepCost,
         };
         this.toolCalls.push(log);
+        // Bounded ledger: keep the newest N entries. The repeat-detection window
+        // (default 60s) and polling TTL scans operate on recent history, so this
+        // prune never weakens detection — it only caps worst-case memory.
+        const maxToolCalls = this.options.maxToolCallHistory ?? 500;
+        if (this.toolCalls.length > maxToolCalls) {
+            this.toolCalls.splice(0, this.toolCalls.length - maxToolCalls);
+        }
         this.cumulativePromptTokens += promptTokens;
         this.cumulativeCompletionTokens += completionTokens;
         this.cumulativeTotalTokens += costData.totalTokens;
         this.cumulativeCost += costData.stepCost;
+        burn_guard_1.MovenOvernightBurnGuard.recordSpend(this, costData.stepCost);
+        // Consume one fallback grace step per tool call (loop-detection
+        // heuristics stay suppressed while grace remains)
+        if (this.fallbackGraceSteps > 0)
+            this.fallbackGraceSteps -= 1;
         // Snapshot Ctrl+Z step checkpoint — immutable deep copy of the FULL
         // in-process orchestration state (context, scratchpad, retry counters,
         // conversation history) taken BEFORE this call can touch the outside world.
@@ -500,6 +698,9 @@ class MovenRunState {
             // Hash turn state for no-progress heuristic
             const turnHash = this.hashStateTurn(log.toolName, res);
             this.stateHashes.push(turnHash);
+            // Bounded: only the most recent hashes feed no-progress / soft-ceiling checks
+            if (this.stateHashes.length > 100)
+                this.stateHashes.splice(0, this.stateHashes.length - 100);
             // Compute and store the goal-state hash (intent + result) for Semantic Fingerprint
             const intentText = log.reasoning || log.toolName;
             const intentHash = semantic_fingerprint_1.SemanticFingerprintEngine.computeIntentHash(intentText, res);
@@ -630,6 +831,7 @@ class MovenRunState {
             customCompletionRatePerMillion: this.options.completionCostPerMillion,
         });
         this.cumulativeCost += costData.stepCost;
+        burn_guard_1.MovenOvernightBurnGuard.recordSpend(this, costData.stepCost);
     }
     getRecentErrorRate() {
         if (this.recentCallOutcomes.length === 0)
@@ -666,15 +868,11 @@ class MovenRunState {
                 last.reasoning = step.trim();
         }
     }
-    /**
-     * Returns true if the given tool name is declared as high-risk by the user,
-     * meaning the async LLM Judge must confirm progress before it executes.
-     */
-    isHighRiskTool(toolName) {
-        return (this.options.highRiskTools ?? []).includes(toolName);
-    }
     addCost(cost) {
+        if (cost <= 0)
+            return;
         this.cumulativeCost += cost;
+        burn_guard_1.MovenOvernightBurnGuard.recordSpend(this, cost);
     }
     getMetrics() {
         const rates = pricing_1.MovenDynamicPricingEngine.getModelRates(this.activeModel);
@@ -727,9 +925,12 @@ class MovenRunState {
                     // Polling TTL exceeded — trip breaker
                     return this.options.maxRepeatCalls ? this.options.maxRepeatCalls + 1 : 10;
                 }
-                // If results are actively changing or within TTL, do NOT treat as stagnant loop!
+                // Polling whitelist applies ONLY while the result state is actually
+                // progressing (pending -> building -> done). A stagnant poll whose
+                // output hash never changes falls through to the normal result-delta
+                // repeat counting below, so it trips like any other looping tool.
                 const hasProgressiveResults = pollingCalls.some(c => c.isResultProgressive);
-                if (hasProgressiveResults || totalPollDurationSec <= ttlSec) {
+                if (hasProgressiveResults) {
                     return 1; // Valid non-stagnant polling
                 }
             }
@@ -810,7 +1011,10 @@ class MovenRunState {
             return crypto_1.default.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
         }
         catch {
-            return `turn_${Date.now()}`;
+            // DETERMINISTIC fallback — a unique-per-call value here would silently
+            // disable no-progress detection (same rule as hashArguments above).
+            const canonical = (0, safe_json_1.stableHashInput)({ toolName, result });
+            return crypto_1.default.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
         }
     }
     /**
@@ -820,7 +1024,7 @@ class MovenRunState {
      */
     generateWorkflowGraph(options) {
         const isKilled = options?.isKilled ?? false;
-        const model = this.getModel() || this.options.model || this.options.currentModel || this.options.judgeModel || 'deepseek/deepseek-chat';
+        const model = this.getModel() || this.options.model || this.options.currentModel || this.options.fallbackModel || 'deepseek/deepseek-chat';
         const provider = this.options.provider || 'openrouter';
         const checkpoints = this.checkpointManager.getCheckpoints();
         const lastCheckpoint = checkpoints[checkpoints.length - 1];

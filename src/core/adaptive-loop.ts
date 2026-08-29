@@ -258,13 +258,13 @@ export class MovenAdaptiveLoopEngine {
     const sameToolCalls = toolCalls.filter(c => c.toolName === lastCall.toolName);
     const consecutiveCount = sameToolCalls.length;
 
-    // 3. For MUTATING tools, enforce strict repeat ceilings (max 2 repeats)
+    // 3. For MUTATING tools, enforce strict repeat ceilings (max 3 total side-effecting calls per run)
     if (category === 'MUTATING') {
       if (consecutiveCount >= 3) {
         return {
           tripped: true,
           heuristic: 'mutating_tool_repeat_exceeded',
-          reason: `Mutating tool '${lastCall.toolName}' called ${consecutiveCount} consecutive times. Side-effect cap tripped to protect database/external integrity.`,
+          reason: `Mutating tool '${lastCall.toolName}' called ${consecutiveCount} times during this run. Side-effect cap tripped to protect database/external integrity.`,
           category,
           noveltyScore: 0.0,
           entropyGain: 0.0,
@@ -290,11 +290,27 @@ export class MovenAdaptiveLoopEngine {
         const prevQuery = this.extractQueryString(prevCall.args);
 
         const noveltyScore = this.computeQueryNoveltyScore(currentQuery, prevQuery);
+
+        // Minimum novelty vs ALL previous queries made with this tool — not
+        // just the last one. Closes the alternating-query evasion where
+        // A,B,A,B novelty-vs-prev oscillates 1.0/0.0: revisiting an older
+        // query is thrashing regardless of what came immediately before.
+        let minNovelty = noveltyScore;
+        for (let i = 0; i < sameToolCalls.length - 1; i++) {
+          const olderQuery = this.extractQueryString(sameToolCalls[i].args);
+          const n = this.computeQueryNoveltyScore(currentQuery, olderQuery);
+          if (n < minNovelty) minNovelty = n;
+        }
+
         const lastEntropy = this.calculateObservationEntropy(lastCall.result);
         const prevEntropy = this.calculateObservationEntropy(prevCall.result);
-        const entropyGain = Number(Math.abs(lastEntropy - prevEntropy).toFixed(4));
+        // Two consecutive near-empty observations carry zero information —
+        // treat as zero gain instead of a meaningless |Δ| of tiny numbers.
+        const entropyGain = (lastEntropy < 0.05 && prevEntropy < 0.05)
+          ? 0.0
+          : Number(Math.abs(lastEntropy - prevEntropy).toFixed(4));
 
-        // IF NOVELTY SCORE >= 0.25: The agent is asking distinctly DIFFERENT queries!
+        // IF NOVELTY SCORE >= 0.22: The agent is asking distinctly DIFFERENT queries!
         // E.g. Query 1: "Tesla revenue 2024", Query 2: "Tesla operating margin", Query 3: "Tesla guidance 2026"
         // This is 100% legitimate research / multi-step search, allow up to customExplorationCap (default: 15)
         if (noveltyScore >= 0.22) {
@@ -322,13 +338,16 @@ export class MovenAdaptiveLoopEngine {
           };
         }
 
-        // IF NOVELTY SCORE < 0.15: The agent is repeating virtually identical search queries!
+        // IF NOVELTY < 0.15: The agent is repeating virtually identical search queries!
         // E.g. "how to refund ticket", "how to refund ticket", "how to refund ticket"
-        if (consecutiveCount >= 3) {
+        // Also trips when the agent revisits ANY older query (minNovelty),
+        // which catches alternating-query loops that evade prev-only checks.
+        if (consecutiveCount >= 3 && (noveltyScore < 0.15 || minNovelty < 0.15)) {
+          const overlapPct = ((1 - (noveltyScore < 0.15 ? noveltyScore : minNovelty)) * 100).toFixed(0);
           return {
             tripped: true,
             heuristic: 'stagnant_query_thrashing',
-            reason: `Stagnant query loop on '${lastCall.toolName}': ${consecutiveCount} consecutive calls with ${( (1 - noveltyScore) * 100 ).toFixed(0)}% query overlap and 0% discovery progression.`,
+            reason: `Stagnant query loop on '${lastCall.toolName}': ${consecutiveCount} calls with ${overlapPct}% query overlap and 0% discovery progression.`,
             category,
             noveltyScore,
             entropyGain,
@@ -336,6 +355,17 @@ export class MovenAdaptiveLoopEngine {
             isLegitimateExploration: false,
           };
         }
+
+        // Ambiguous band (0.15 ≤ novelty < 0.22) or insufficient repeats:
+        // allow, but surface the REAL novelty/entropy scores (never fake 1.0).
+        return {
+          tripped: false,
+          category,
+          noveltyScore,
+          entropyGain,
+          consecutiveCount,
+          isLegitimateExploration: true,
+        };
       }
 
       return {

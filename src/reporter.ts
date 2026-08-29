@@ -3,14 +3,56 @@ import { MovenRunState, DEFAULT_CHEAPER_MODEL_MAP } from './core/run-state';
 import { MovenPiiRedactor } from './core/pii';
 import type { RewindReceipt } from './core/rewind';
 import { safeStringify } from './core/safe-json';
+import { MovenLogger } from './core/logger';
 
 export interface MovenReporterOptions {
   apiKey?: string;
   endpoint?: string;
   maxRetries?: number;
   timeoutMs?: number;
-  batchIntervalMs?: number;
   zeroDataRetention?: boolean;
+  /** Consecutive transport failures before telemetry itself opens a cooldown (default: 5) */
+  telemetryFailureThreshold?: number;
+  /** Cooldown (ms) while telemetry is offline — events fail fast with zero network cost (default: 60_000) */
+  telemetryCooldownMs?: number;
+}
+
+/**
+ * Telemetry self-protection ("circuit breaker on the telemetry channel"):
+ * when the backend is unreachable, the reporter stops hammering it after N
+ * consecutive failures and fail-fasts for a cooldown window. The agent hot
+ * path never blocks on telemetry — local breaker evaluation is fully
+ * independent of this channel.
+ */
+class TelemetryBreaker {
+  private consecutiveFailures: number = 0;
+  private openUntil: number = 0;
+
+  constructor(
+    private readonly failureThreshold: number,
+    private readonly cooldownMs: number
+  ) {}
+
+  public isOffline(): boolean {
+    return Date.now() < this.openUntil;
+  }
+
+  public recordSuccess(): void {
+    this.consecutiveFailures = 0;
+    this.openUntil = 0;
+  }
+
+  public recordFailure(): void {
+    this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= this.failureThreshold) {
+      this.openUntil = Date.now() + this.cooldownMs;
+      MovenLogger.warn(
+        `Telemetry backend unreachable after ${this.consecutiveFailures} consecutive failures — pausing outbound telemetry for ${Math.round(this.cooldownMs / 1000)}s. In-process circuit breaker protection is NOT affected.`,
+        { consecutiveFailures: this.consecutiveFailures, cooldownMs: this.cooldownMs }
+      );
+      this.consecutiveFailures = 0;
+    }
+  }
 }
 
 export class MovenReporter {
@@ -19,6 +61,7 @@ export class MovenReporter {
   private maxRetries: number;
   private timeoutMs: number;
   private zeroDataRetention: boolean;
+  private telemetryBreaker: TelemetryBreaker;
 
   constructor(apiKeyOrOptions?: string | MovenReporterOptions, endpoint?: string) {
     if (typeof apiKeyOrOptions === 'object' && apiKeyOrOptions !== null) {
@@ -27,34 +70,67 @@ export class MovenReporter {
       this.maxRetries = apiKeyOrOptions.maxRetries ?? 3;
       this.timeoutMs = apiKeyOrOptions.timeoutMs ?? 5000;
       this.zeroDataRetention = apiKeyOrOptions.zeroDataRetention ?? false;
+      this.telemetryBreaker = new TelemetryBreaker(
+        apiKeyOrOptions.telemetryFailureThreshold ?? 5,
+        apiKeyOrOptions.telemetryCooldownMs ?? 60_000
+      );
     } else {
       this.apiKey = apiKeyOrOptions || (typeof process !== 'undefined' ? process.env.MOVEN_API_KEY : undefined);
       this.endpoint = endpoint || (typeof process !== 'undefined' ? process.env.MOVEN_ENDPOINT : undefined) || 'https://api.moven.dev/events';
       this.maxRetries = 3;
       this.timeoutMs = 5000;
       this.zeroDataRetention = false;
+      this.telemetryBreaker = new TelemetryBreaker(5, 60_000);
+    }
+  }
+
+  /**
+   * Zero-Trust outbound path: EVERY telemetry payload is sanitized through
+   * the PII/secret redactor before it leaves the process — prompts, tool
+   * args, checkpoints and receipts included.
+   */
+  private async postEvent(payload: any, options: { retries?: number } = {}): Promise<Response> {
+    // Telemetry breaker open → fail fast with zero network cost. The in-process
+    // breaker keeps protecting the agent; only the export channel is paused.
+    if (this.telemetryBreaker.isOffline()) {
+      return new Response(JSON.stringify({ error: 'moven_telemetry_paused' }), {
+        status: 503,
+        statusText: 'Moven Telemetry Paused',
+      });
+    }
+
+    const sanitized = MovenPiiRedactor.sanitizePayload(payload, {
+      zeroDataRetention: this.zeroDataRetention,
+      maskApiKeys: true,
+      maskCreditCards: true,
+      maskSsns: true,
+      maskIbans: true,
+    });
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.apiKey) headers['x-moven-api-key'] = this.apiKey;
+
+    try {
+      const res = await this.fetchWithRetry(this.endpoint, {
+        method: 'POST',
+        headers,
+        body: safeStringify(sanitized),
+      }, options.retries ?? this.maxRetries);
+      if (res.ok) {
+        this.telemetryBreaker.recordSuccess();
+      } else if (res.status >= 500) {
+        this.telemetryBreaker.recordFailure();
+      }
+      return res;
+    } catch (err) {
+      this.telemetryBreaker.recordFailure();
+      throw err;
     }
   }
 
   public async sendPayload(payload: any): Promise<boolean> {
     try {
-      // Enterprise Zero-Trust Client-Side PII Sanitization
-      const sanitized = MovenPiiRedactor.sanitizePayload(payload, {
-        zeroDataRetention: this.zeroDataRetention,
-        maskApiKeys: true,
-        maskCreditCards: true,
-        maskSsns: true,
-        maskIbans: true,
-      });
-
-      const res = await this.fetchWithRetry(this.endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(this.apiKey ? { 'x-moven-api-key': this.apiKey } : {}),
-        },
-        body: safeStringify(sanitized),
-      });
+      const res = await this.postEvent(payload);
       return res.ok;
     } catch {
       return false;
@@ -75,15 +151,19 @@ export class MovenReporter {
         if (res.ok) return res;
         if (res.status >= 400 && res.status < 500) {
           // Client errors (e.g. 401, 403) should not retry but must be visibly surfaced
+          let detail = res.statusText;
+          let hint: string | undefined;
           try {
             const errorClone = res.clone();
             const errorBody = await errorClone.json();
-            console.error(`\x1b[31m[Moven Telemetry Error HTTP ${res.status}]\x1b[0m: ${errorBody.error || errorBody.message || res.statusText}`);
-            if (errorBody.hint) {
-              console.error(`\x1b[33m[Moven Telemetry Hint]\x1b[0m: ${errorBody.hint}`);
-            }
+            detail = errorBody.error || errorBody.message || res.statusText;
+            hint = errorBody.hint;
           } catch {
-            console.error(`\x1b[31m[Moven Telemetry Error HTTP ${res.status}]\x1b[0m: ${res.statusText}`);
+            // keep statusText fallback
+          }
+          MovenLogger.error(`Telemetry Error HTTP ${res.status}: ${detail}`, { status: res.status, endpoint: this.endpoint });
+          if (hint) {
+            MovenLogger.warn(`Telemetry Hint: ${hint}`);
           }
           return res;
         }
@@ -96,43 +176,6 @@ export class MovenReporter {
       }
     }
     throw lastError || new Error(`Failed request to ${url} after ${retries} retries`);
-  }
-
-  public async queryJudgeArbitrator(state: MovenRunState): Promise<{
-    judgeModel: string;
-    cheaperModel: string;
-    pricing?: { promptPerMillion: number; completionPerMillion: number };
-    reason?: string;
-  } | null> {
-    const judgeEndpoint = this.endpoint.replace(/\/api\/events$/, '/api/judge-arbitrator');
-    try {
-      const res = await this.fetchWithRetry(judgeEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: safeStringify({
-          provider: state.options.provider || 'openrouter',
-          modelAuthor: state.options.modelAuthor || '',
-          currentModel: state.options.currentModel || state.options.judgeModel || '',
-          model: state.options.judgeModel,
-          toolCalls: state.toolCalls,
-          agentId: state.agentId,
-          agentName: state.agentName,
-          framework: state.framework,
-          version: state.version,
-          tags: state.tags,
-        }),
-      }, 1);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.circuitRules) {
-          state.updateOptions(data.circuitRules);
-        }
-        return data;
-      }
-    } catch {
-      // Fallback silently without throwing to maintain Zero Overhead guarantee
-    }
-    return null;
   }
 
   public async reportKillEvent(error: MovenKillError, state: MovenRunState): Promise<boolean> {
@@ -180,23 +223,14 @@ export class MovenReporter {
       timestamp: new Date().toISOString(),
     };
 
-    // Note: If no API key is provided, still attempt local endpoint POST for dashboard telemetry & webhooks
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (this.apiKey) headers['x-moven-api-key'] = this.apiKey;
-
-      const response = await this.fetchWithRetry(this.endpoint, {
-        method: 'POST',
-        headers,
-        body: safeStringify(payload),
-      });
-
+      const response = await this.postEvent(payload);
       return response.ok;
     } catch (err: any) {
       if (!this.apiKey) {
-        console.log(`[Moven AI] Standalone Mode — Circuit Breaker Tripped! Run: ${state.runId} | Reason: ${error.reason}`);
+        MovenLogger.warn(`Standalone Mode — Circuit Breaker Tripped! Run: ${state.runId} | Reason: ${error.reason}`);
       } else {
-        console.warn(`[Moven AI] Failed to transmit kill event to backend: ${err.message}`);
+        MovenLogger.warn(`Failed to transmit kill event to backend: ${err?.message || String(err)}`);
       }
       return false;
     }
@@ -237,13 +271,7 @@ export class MovenReporter {
     };
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (this.apiKey) headers['x-moven-api-key'] = this.apiKey;
-      const res = await this.fetchWithRetry(this.endpoint, {
-        method: 'POST',
-        headers,
-        body: safeStringify(payload),
-      });
+      const res = await this.postEvent(payload);
       return res.ok;
     } catch {
       return false;
@@ -312,14 +340,7 @@ export class MovenReporter {
     };
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (this.apiKey) headers['x-moven-api-key'] = this.apiKey;
-
-      const res = await this.fetchWithRetry(this.endpoint, {
-        method: 'POST',
-        headers,
-        body: safeStringify(payload),
-      });
+      const res = await this.postEvent(payload);
       return res.ok;
     } catch {
       return false;
@@ -357,7 +378,6 @@ export class MovenReporter {
         max_no_progress_turns: state.options.maxNoProgressTurns ?? 3,
         cheaper_model: state.options.cheaperModel || state.getCheaperModel(),
         auto_fallback_cheaper_model: state.options.autoFallbackCheaperModel ?? true,
-        enable_llm_judge_arbitrator: state.options.enableLlmJudgeArbitrator ?? true,
         current_model: model,
         provider,
       },
@@ -365,14 +385,7 @@ export class MovenReporter {
 
     // Always try to send, even without API key (for local dev)
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (this.apiKey) headers['x-moven-api-key'] = this.apiKey;
-
-      const res = await this.fetchWithRetry(this.endpoint, {
-        method: 'POST',
-        headers,
-        body: safeStringify(payload),
-      }, 2);
+      const res = await this.postEvent(payload, { retries: 2 });
 
       // If backend returns updated rules, overwrite local state with cloud settings
       if (res.ok) {
@@ -386,8 +399,8 @@ export class MovenReporter {
               maxDepth: pol.maxDepth ?? pol.max_depth,
               maxNoProgressTurns: pol.maxNoProgressTurns ?? pol.max_no_progress_turns ?? pol.max_no_progressturns,
               cheaperModel: pol.cheaperModel ?? pol.cheaper_model,
+              fallbackModel: pol.fallbackModel ?? pol.fallback_model,
               autoFallbackCheaperModel: pol.autoFallbackCheaperModel ?? pol.auto_fallback_cheaper_model,
-              enableLlmJudgeArbitrator: pol.enableLlmJudgeArbitrator ?? pol.enable_llm_judge_arbitrator ?? pol.enable_llm_judge,
               enableSemanticCache: pol.enableSemanticCache ?? pol.enable_semantic_cache,
               semanticCache: pol.semanticCache || (pol.semantic_cache_threshold ? {
                 similarityThreshold: pol.semantic_cache_threshold,

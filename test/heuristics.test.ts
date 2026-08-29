@@ -44,7 +44,7 @@ async function runTests() {
   // Test 3: Depth Ceiling Circuit Breaker
   {
     console.log('Test 3: Depth Ceiling Circuit Breaker');
-    const state = new MovenRunState({ maxDepth: 5, maxRepeatCalls: 10, enableLlmJudgeArbitrator: false });
+    const state = new MovenRunState({ maxDepth: 5, maxRepeatCalls: 10 });
     for (let i = 0; i < 6; i++) {
       state.recordToolCall(`unique_tool_name_${i}`, { step: i, random: Math.random() });
     }
@@ -70,7 +70,6 @@ async function runTests() {
     const { tools } = wrapToolsWithMoven(dummyToolsDiff, {
       maxRepeatCalls: 3,
       agentName: 'weather-bot-test',
-      enableLlmJudgeArbitrator: false,
       autoFallbackCheaperModel: false, // Disable fallback so trip throws directly
     });
 
@@ -109,7 +108,6 @@ async function runTests() {
       agentName: 'fallback-test-agent',
       provider: 'openai',
       currentModel: 'gpt-4o',
-      enableLlmJudgeArbitrator: false,
       autoFallbackCheaperModel: true, // Fallback should activate, NOT throw
     });
 
@@ -225,3 +223,4 @@ runTests().catch((err) => {
   console.error('❌ Test failed:', err);
   process.exit(1);
 });
+

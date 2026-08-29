@@ -103,24 +103,30 @@ async function runGuardedSuite() {
   }
   console.log(`   ✅ Successfully executed ${executedCount}/5 distinct city queries through movenGuard()`);
 
-  // Now test that repeating same city triggers breaker
+  // Now test the full fallback → grace → kill lifecycle:
+  // 1st trip (3 repeats) activates auto-fallback WITHOUT killing,
+  // loop heuristics are suppressed for the 3-call grace window,
+  // then the next trip throws MovenKillError.
+  let sawFallbackActive = false;
   let threwKillError = false;
+  const guardedAny = guardedFetchWeather as any;
   try {
-    // 3 more calls to same city
-    await guardedFetchWeather({ city: 'SF' });
-    await guardedFetchWeather({ city: 'SF' });
-    await guardedFetchWeather({ city: 'SF' });
+    for (let i = 0; i < 15; i++) {
+      await guardedFetchWeather({ city: 'SF' });
+      if (guardedAny.moven?.state?.isFallbackActive) sawFallbackActive = true;
+    }
   } catch (err: any) {
+    if (guardedAny.moven?.state?.isFallbackActive) sawFallbackActive = true;
     if (err instanceof MovenKillError || err.name === 'MovenKillError') {
       threwKillError = true;
-      console.log(`   ✅ Caught MovenKillError: ${err.message}`);
+      console.log(`   ✅ Caught MovenKillError after fallback grace: ${err.message}`);
     }
   }
 
-  if (threwKillError) {
-    console.log('🎉 TEST 3 PASSED: movenGuard functional wrapper tested 100% successfully!\n');
+  if (threwKillError && sawFallbackActive) {
+    console.log('🎉 TEST 3 PASSED: movenGuard wrapper — fallback activated first, then kill after grace!\n');
   } else {
-    console.error('❌ TEST 3 FAILED: movenGuard did not throw MovenKillError on repeat loop');
+    console.error(`❌ TEST 3 FAILED: threwKillError=${threwKillError}, sawFallbackActive=${sawFallbackActive}`);
     process.exit(1);
   }
 }

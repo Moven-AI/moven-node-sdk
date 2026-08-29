@@ -9,6 +9,13 @@ declare module '../core/run-state' {
     }
 }
 /**
+ * Core wrapping logic — wraps tool definitions against a GIVEN run state so
+ * every entry point (wrapToolsWithMoven, createMovenCircuitBreaker, the
+ * LangGraph guard) shares one state. This is what keeps breaker.rewind()
+ * operating on the SAME ledger the wrapped tools write to.
+ */
+export declare function wrapToolsWithState<T extends Record<string, any>>(tools: T, state: MovenRunState, reporter: MovenReporter, options?: MovenOptions): T;
+/**
  * Wraps tool definitions for Vercel AI SDK generateText/streamText.
  * Intercepts tool execution, updates run-state, checks heuristics, and trips circuit breaker on limit violation.
  */
@@ -39,9 +46,26 @@ export declare function createMovenCircuitBreaker(options?: MovenOptions): {
     registerCompensation: (toolName: string, comp: CompensationInput) => void;
     updateSettings: (newOptions: Partial<MovenOptions>) => Promise<MovenOptions>;
     syncWithCloud: () => Promise<MovenOptions>;
+    /**
+     * Wraps tools against THIS breaker's run state — the same state that
+     * rewind()/resolveHalt() operate on, so Ctrl+Z always rewinds the
+     * ledger the tools actually wrote to.
+     */
     wrapTools: <T extends Record<string, any>>(tools: T) => T & {
         tools: T;
         state: MovenRunState;
         reporter: MovenReporter;
     };
+    /**
+     * FRAMEWORK-AGNOSTIC WARNING FLOW — works with any SDK (OpenAI, Anthropic,
+     * CrewAI, AutoGen, LlamaIndex, raw fetch loops). Call this on your messages
+     * array right before EVERY model invocation; pending pre-trip warnings are
+     * appended as a final `{ role: 'system', content }` message and drained.
+     * Pure — the input array is never mutated.
+     */
+    warnModel: (messages: any[]) => any[];
+    /** Manually drain pending pre-trip warnings (custom prompt templating). */
+    drainWarnings: () => import("../core/run-state").MovenGuardWarning[];
+    /** Non-destructive peek at queued warnings (dashboards, tests, logging). */
+    peekWarnings: () => import("../core/run-state").MovenGuardWarning[];
 };

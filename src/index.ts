@@ -46,8 +46,39 @@ export type { HallucinationResult } from './core/hallucination';
 export { MovenPromptInjectionFirewall } from './core/prompt-firewall';
 export type { PromptFirewallConfig, PromptFirewallResult } from './core/prompt-firewall';
 
-export { MovenKillError } from './core/errors';
+export { MovenKillError, MovenPauseError } from './core/errors';
 export type { MovenKillMetrics, MovenHeuristicType } from './core/errors';
+
+// Production-grade logging (level control, pluggable transports, JSON mode)
+export { MovenLogger } from './core/logger';
+export type { MovenLogLevel, MovenLogFields, MovenLogTransport } from './core/logger';
+
+// Instruction-intent classifier (human-directed repetition detection)
+export { MovenInstructionClassifier, extractTopicTerms, extractCallTerms, termOverlap } from './core/intent-classifier';
+export type { InstructionClassification } from './core/intent-classifier';
+export type { AttestationProfile, MovenGuardWarning } from './core/run-state';
+
+// LangGraph / LangChain guard: model-level pre-trip warnings + tool interception
+export {
+  createMovenLangGraphGuard,
+  wrapModelWithMoven,
+  withMovenWarnings,
+  buildWarningText,
+} from './adapters/langgraph';
+export type { MovenLangGraphGuard } from './adapters/langgraph';
+
+// OpenTelemetry export (OTLP/HTTP JSON + @opentelemetry/api bridge)
+export { MovenOtelExporter, recordToolCallSpan, recordDecisionSpan, recordRewindSpan } from './otel';
+export type { MovenOtelOptions, MovenSpanInput } from './otel';
+
+// Policy regression verification (CI: `moven verify`)
+export { MovenVerifier } from './verify';
+export type {
+  RecordedTrace,
+  RecordedToolCall,
+  VerifyReport,
+  VerifyTraceReport,
+} from './verify';
 
 export { MovenKillHandler } from './kill/abort';
 export { MovenReporter } from './reporter';

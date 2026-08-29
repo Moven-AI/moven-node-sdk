@@ -1,6 +1,6 @@
 {
   "name": "moven-sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The circuit breaker for AI agents. Detect runaway loops and cost spikes in real time.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "ts-node test/heuristics.test.ts && ts-node test/burn-guard.test.ts && ts-node test/hallucination.test.ts",
+    "test": "ts-node test/heuristics.test.ts && ts-node test/burn-guard.test.ts && ts-node test/hallucination.test.ts && ts-node test/firewall.test.ts && ts-node test/rewind.test.ts && ts-node test/layer2-semantic-guard.test.ts && ts-node test/hardening.test.ts && ts-node test/user-intent.test.ts && ts-node test/langgraph-warning.test.ts && ts-node test/regression.test.ts && ts-node test/verify-otel.test.ts",
     "prepublishOnly": "npm run build"
   },
   "files": [

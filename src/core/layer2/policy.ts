@@ -7,8 +7,21 @@ import {
   ToolSemanticPolicy,
 } from './types';
 
+export type HysteresisState = 'NORMAL' | 'INTERVENTION';
+
+/** Mutable holder so callers can scope hysteresis to a run instead of the process. */
+export interface HysteresisHolder {
+  state: HysteresisState;
+}
+
 export class SemanticPolicyEngine {
-  private static activeHysteresisState: Map<string, 'NORMAL' | 'INTERVENTION'> = new Map();
+  /**
+   * @deprecated Process-wide fallback. Hysteresis should be scoped per run —
+   * pass a HysteresisHolder from the guard instance instead. The static map
+   * leaks memory in long-lived processes and lets one bad run poison every
+   * future run of the same agentId.
+   */
+  private static activeHysteresisState: Map<string, HysteresisState> = new Map();
 
   public static evaluatePolicy(
     agentId: string,
@@ -18,7 +31,8 @@ export class SemanticPolicyEngine {
     options?: Layer2Options,
     toolPolicy?: ToolSemanticPolicy,
     latencyUs: number = 250,
-    cached: boolean = false
+    cached: boolean = false,
+    hysteresis?: HysteresisHolder
   ): Layer2DecisionResult {
     const redundancyThreshold = options?.redundancyThreshold ?? 0.95;
     const driftThreshold = options?.driftThreshold ?? 0.90;
@@ -28,7 +42,7 @@ export class SemanticPolicyEngine {
     const recoverThreshold = options?.recoverThreshold ?? 0.70;
     const hysteresisEnabled = options?.hysteresisEnabled ?? true;
 
-    const currentState = this.activeHysteresisState.get(agentId) || 'NORMAL';
+    const currentState = hysteresis ? hysteresis.state : (this.activeHysteresisState.get(agentId) || 'NORMAL');
     let nextState = currentState;
 
     let decision: DecisionType = 'ALLOW';
@@ -76,7 +90,11 @@ export class SemanticPolicyEngine {
     }
 
     if (hysteresisEnabled) {
-      this.activeHysteresisState.set(agentId, nextState);
+      if (hysteresis) {
+        hysteresis.state = nextState;
+      } else {
+        this.activeHysteresisState.set(agentId, nextState);
+      }
     }
 
     return {
@@ -91,6 +109,7 @@ export class SemanticPolicyEngine {
     };
   }
 
+  /** @deprecated Use per-run HysteresisHolder scopes instead. */
   public static resetHysteresis(agentId: string): void {
     this.activeHysteresisState.delete(agentId);
   }

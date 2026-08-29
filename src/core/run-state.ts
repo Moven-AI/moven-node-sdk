@@ -1,15 +1,61 @@
 import crypto from 'crypto';
 import { MovenKillError, MovenKillMetrics } from './errors';
 import { safeStringify, stableHashInput } from './safe-json';
-import { BurnGuardOptions } from './burn-guard';
+import { BurnGuardOptions, MovenOvernightBurnGuard } from './burn-guard';
 import { SemanticCacheOptions } from './semantic-cache';
 import { MovenCheckpointManager, MovenCompensationRegistry, CompensationInput } from './checkpoint';
 import { SemanticFingerprintOptions, SemanticFingerprintEngine } from './semantic-fingerprint';
 import { MovenDynamicPricingEngine } from './pricing';
 import { PromptFirewallConfig } from './prompt-firewall';
 import { Layer2Options, MovenLayer2Guard, Layer2DecisionResult } from './layer2';
+import { MovenOtelOptions, MovenOtelExporter } from '../otel';
+import { validateAndClampOptions } from './option-validation';
+import { MovenInstructionClassifier, extractCallTerms, termOverlap } from './intent-classifier';
+import { MovenAdaptiveLoopEngine } from './adaptive-loop';
+import { MovenLogger } from './logger';
 
 export type ToolCallStatus = 'queued' | 'in_flight' | 'committed' | 'cancelled';
+
+/**
+ * A PRE-TRIP warning destined for the MODEL: the breaker detected a pattern
+ * one step away from tripping and wants the LLM to self-correct before the
+ * kill. The LangGraph / Vercel model wrappers drain these and inject them
+ * into the next model invocation as a system-style notice.
+ */
+export interface MovenGuardWarning {
+  id: string;
+  heuristic: string;
+  toolName?: string;
+  argsHash?: string;
+  /** How many calls remain before the breaker trips. */
+  remaining: number;
+  message: string;
+  createdAt: number;
+}
+
+/**
+ * The active result of the instruction-intent classifier: describes WHICH
+ * calls are human-directed, with what repetition budget, until when.
+ */
+export interface AttestationProfile {
+  /** Epoch ms after which the attestation expires. */
+  until: number;
+  /** Classifier confidence (0..1) for the directive. */
+  confidence: number;
+  /** Directive family that triggered. */
+  kind: 'explicit_count' | 'again' | 'repeat_verb' | 'persist' | 'none';
+  /**
+   * Explicit repetition budget extracted from the instruction ("5 times" → 5).
+   * When set, the stagnation ceiling for attested calls trips AFTER this many
+   * identical results (the user's own stated limit), replacing
+   * maxHumanAttestedStagnantSteps.
+   */
+  repetitionAllowance?: number;
+  /** Content terms used for topic→call attribution. */
+  topicTerms: string[];
+  /** True when the directive carries no topic terms ("do it again") — attests the current call pattern generally. */
+  general: boolean;
+}
 
 export interface ToolCallLog {
   toolName: string;
@@ -48,6 +94,14 @@ export interface ToolCallLog {
   isPollingTool?: boolean;
   /** True if tool is read-only (e.g. get_, fetch_, search_) */
   isReadOnly?: boolean;
+  /**
+   * True when this call was executed while a human instruction was active
+   * (a fresh user prompt opened the attestation window). User-directed
+   * repetitions — "search it 5 times" — are legitimate work, so loop
+   * heuristics are relaxed for them while the stagnation ceiling and hard
+   * limits (cost / depth / burn guard) stay enforced.
+   */
+  humanAttested?: boolean;
 }
 
 export interface MovenOptions {
@@ -69,7 +123,10 @@ export interface MovenOptions {
   maxCostDollar?: number; // default: 2.00
   maxDepth?: number; // default: 15
   maxNoProgressTurns?: number; // default: 3
-  judgeModel?: string; // default: 'google/gemini-2.5-flash-lite'
+  /** @deprecated legacy alias for `fallbackModel` — the cheap model used for fallback routing */
+  judgeModel?: string;
+  /** Cheap fallback model ID used when routing down (default: 'google/gemini-2.5-flash-lite') */
+  fallbackModel?: string;
   provider?: 'openai' | 'anthropic' | 'google' | 'cohere' | 'mistral' | 'groq' | 'openrouter' | string;
   model?: string; // Primary model ID (e.g. 'deepseek/deepseek-chat', 'openai/gpt-4o')
   modelAuthor?: string; // The model family author (e.g. 'openai' from 'openai/gpt-4o-mini')
@@ -77,7 +134,8 @@ export interface MovenOptions {
   cheaperModel?: string; // Explicit cheaper fallback model ID (e.g. 'google/gemini-2.5-flash-lite')
   cheaperModelMap?: Record<string, string>; // Mapping of provider/primary model -> cheaper model
   autoFallbackCheaperModel?: boolean; // default: true
-  enableLlmJudgeArbitrator?: boolean; // default: true
+  /** Soft (opt-in) cost ceiling: allows 25% headroom when the run is demonstrably making progress. Default: hard ceiling. */
+  softCostCeiling?: boolean;
   burnGuard?: BurnGuardOptions; // Overnight Burn Guard ($2000 loss prevention engine)
   enableSemanticCache?: boolean; // Semantic caching engine enabled flag (default: true)
   semanticCache?: SemanticCacheOptions; // Semantic caching engine options
@@ -103,6 +161,46 @@ export interface MovenOptions {
   /** Historical 95th-percentile step baseline for adaptive threshold scaling */
   percentileStepBaseline?: number;
 
+  // ─── USER-INTENT ATTESTATION (human-directed repetition tolerance) ────
+  /**
+   * How long a classified repetition directive "attests" subsequent matching
+   * tool calls as human-directed (default: 300,000ms = 5 minutes, or until
+   * the next user instruction). Attested calls are exempt from loop
+   * heuristics but NOT from the stagnation ceiling or hard limits.
+   */
+  humanAttestationWindowMs?: number;
+  /**
+   * Maximum consecutive HUMAN-ATTESTED calls that return byte-identical
+   * results before the breaker trips anyway (default: 12). This is the
+   * "even if the user asked for it, this is now waste" backstop. When the
+   * user stated an explicit count ("5 times"), the extracted count replaces
+   * this ceiling for that attestation.
+   */
+  maxHumanAttestedStagnantSteps?: number;
+  /**
+   * Minimum classifier score for a user message to count as a repetition
+   * directive (default 0.5 — one strong directive family passes; two partial
+   * hints combine to pass).
+   */
+  intentDirectiveThreshold?: number;
+  /**
+   * Master switch for the "Allow Repeat Tool Calls If User Asks" behavior
+   * (console: Agent Settings → User-Intent Attestation). Default: enabled
+   * whenever recordUserInstruction / mid-run user messages are used. Set to
+   * `false` for the strictest posture — user-directed repeats are then
+   * treated like any other loop and trip the breaker.
+   */
+  enableUserIntentAttestation?: boolean;
+
+  // ─── PRE-TRIP MODEL WARNINGS (self-correction instead of instant kill) ──
+  /**
+   * When enabled (default), the breaker queues a WARNING for the model when
+   * a pattern is one call away from tripping (repeat / no-progress). The
+   * LangGraph / Vercel model wrappers inject it into the next model
+   * invocation so the LLM can change strategy before the kill.
+   */
+  warnBeforeTrip?: boolean;
+
   // ─── SRE TECHNICAL RELIABILITY & STRUCTURAL SCHEMA SAFEGUARDS ───
   /** Maximum error failure rate percentage over sliding request window before circuit opens (default: 50%) */
   maxErrorRatePct?: number;
@@ -121,10 +219,22 @@ export interface MovenOptions {
   /** Sliding window size in requests for calculating error and slow call rates (default: 20) */
   slidingWindowRequests?: number;
 
-  /** Tool names that should be gated by the async LLM Judge before execution (e.g. 'sendEmail', 'writeToDb') */
-  highRiskTools?: string[];
   /** Bounded checkpoint retention window (default 50 turns) */
   maxCheckpoints?: number;
+  /**
+   * Bounded tool-call ledger retention (default 500 entries). Enterprise runs
+   * must not grow memory without limit; pruning keeps the newest entries and
+   * every repeat/no-progress detection window (60s default) stays intact.
+   */
+  maxToolCallHistory?: number;
+  /** Bounded prompt-history retention (default 200 entries) */
+  maxPromptHistory?: number;
+  /**
+   * Automatically run the Ctrl+Z rewind engine (saga compensations + halt +
+   * cooldown + receipt) when the circuit breaker kills this run.
+   * Default: false — rewind stays operator-triggered unless opted in.
+   */
+  autoRewindOnKill?: boolean;
   /**
    * Compensating actions (saga pattern) registered at construction:
    * { create_row: (args, result) => db.delete_row(result.id) } or
@@ -141,6 +251,8 @@ export interface MovenOptions {
   completionCostPerMillion?: number;
   apiKey?: string;
   endpoint?: string; // default: https://api.moven.dev/events
+  /** OpenTelemetry export of breaker decisions + tool-call spans (see src/otel.ts). Auto-on when OTEL_EXPORTER_OTLP_ENDPOINT is set. */
+  otel?: MovenOtelOptions;
   onKill?: (error: any) => void;
   onPause?: (info: { agentName: string; reason: string; toolName?: string; args?: any; resumeToken: string }) => void;
   onHallucination?: (info: { agentName: string; reason: string; toolName?: string; args?: any }) => void;
@@ -240,6 +352,33 @@ export class MovenRunState {
   public layer2Guard: MovenLayer2Guard;
   /** Latest Layer 2 decision result */
   public lastLayer2Result?: Layer2DecisionResult;
+  /**
+   * Per-run rolling hourly spend window (timestamp, cost) used by the
+   * Overnight Burn Guard's velocity check. Scoped to THIS run — no
+   * cross-run contamination from static shared state.
+   */
+  public hourlySpendWindow: { timestamp: number; cost: number }[] = [];
+  /**
+   * Grace steps granted after an auto-fallback switch: loop-detection
+   * heuristics (repeat / no-progress / semantic / layer2) are suppressed
+   * for this many tool calls so the cheaper model gets a fair chance to
+   * show progress. Hard limits (cost, depth, burn guard, firewall,
+   * hallucination, SRE) stay active the whole time.
+   */
+  public fallbackGraceSteps: number = 0;
+
+  /** Epoch ms until which tool calls are attested as human-directed. */
+  public humanAttestUntil: number = 0;
+
+  /**
+   * The ACTIVE attestation produced by the instruction-intent classifier:
+   * confidence, extracted repetition budget, and topic terms used to match
+   * the directive to the tool calls it actually applies to.
+   */
+  private attestation?: AttestationProfile;
+
+  /** Pre-trip warnings waiting to be injected into the next model call. */
+  private pendingWarnings: MovenGuardWarning[] = [];
 
   // ─── IN-PROCESS ORCHESTRATION STATE (rewindable — Mechanism 1) ───────────
   /** Agent context / plan. Deep-copied into every checkpoint; restored on rewind. */
@@ -263,16 +402,28 @@ export class MovenRunState {
   /** Ctrl+Z checkpoint ledger (bounded retention) */
   public checkpointManager: MovenCheckpointManager;
 
+  /**
+   * Single-flight kill guard: guarantees the kill side-effects (banner,
+   * onKill callback, cooldown, kill event) run EXACTLY once even when
+   * concurrent tool executions trip the breaker in the same tick.
+   */
+  private killInitiated: boolean = false;
+
   constructor(options: MovenOptions = {}) {
-    this.options = {
+    // Enterprise hardening: clamp invalid thresholds (NaN/negative/zero) into
+    // safe ranges BEFORE defaults merge — a misconfigured limit must never
+    // silently disable a safety ceiling.
+    this.options = validateAndClampOptions({
       maxRepeatCalls: 5,
       repeatTimeWindowMs: 60000,
       maxCostDollar: 2.00,
       maxDepth: 15,
       maxNoProgressTurns: 3,
+      maxToolCallHistory: 500,
+      maxPromptHistory: 200,
       judgeModel: options.judgeModel || 'google/gemini-2.5-flash-lite',
+      fallbackModel: options.fallbackModel || options.judgeModel || 'google/gemini-2.5-flash-lite',
       autoFallbackCheaperModel: options.autoFallbackCheaperModel ?? true,
-      enableLlmJudgeArbitrator: options.enableLlmJudgeArbitrator ?? true,
       maxErrorRatePct: options.maxErrorRatePct ?? 50.00,
       maxSlowCallLatencyMs: options.maxSlowCallLatencyMs ?? 30000,
       maxSlowCallRatePct: options.maxSlowCallRatePct ?? 40.00,
@@ -283,7 +434,7 @@ export class MovenRunState {
       slidingWindowRequests: options.slidingWindowRequests ?? 20,
       agentName: 'agent-run',
       ...options,
-    };
+    });
     this.runId = options.runId || `run_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     
     // Strict lowercase kebab-case slug format
@@ -305,6 +456,13 @@ export class MovenRunState {
     // Initialize Layer 2 Semantic Guard
     this.layer2Guard = new MovenLayer2Guard(this.agentId, this.options.layer2);
 
+    // OTel export: auto-enabled via OTEL_EXPORTER_OTLP_ENDPOINT (see otel.ts).
+    // Only (re)configure when the caller supplied options — manual
+    // MovenOtelExporter.configure() calls elsewhere are preserved.
+    if (this.options.otel) {
+      MovenOtelExporter.configure(this.options.otel);
+    }
+
     // Bounded checkpoint ledger + compensation registry (saga pattern)
     this.checkpointManager = new MovenCheckpointManager(this.options.maxCheckpoints ?? 50);
     if (options.compensations) {
@@ -320,6 +478,12 @@ export class MovenRunState {
     if (req) {
       this.userRequest = req;
       this.layer2Guard.memory.setGoal(this.userRequest);
+      // NOTE: the INITIAL task prompt deliberately does NOT open an
+      // attestation window — a first-turn instruction is the agent's job
+      // description, not a license for unlimited repetition. Layer 2 and
+      // loop heuristics must stay armed for agent-initiated redundancy
+      // inside that first turn. Only MID-RUN user messages (or explicit
+      // recordUserInstruction calls) attest.
     }
     if (options.metadata?.system_prompt || options.metadata?.systemPrompt) {
       this.systemPrompt = options.metadata.system_prompt || options.metadata.systemPrompt;
@@ -337,7 +501,120 @@ export class MovenRunState {
   }
 
   public recordPrompt(content: string, role: string = 'user') {
+    // Mid-run user messages flow through the intent classifier: only a
+    // message that actually LICENSES repetition ("search it 5 times", "do
+    // it again", "poll until done") opens an attestation window — a plain
+    // follow-up question ("what's their PE ratio?") must not disarm loop
+    // detection. A negation ("stop searching") revokes the attestation.
+    if (role === 'user') {
+      this.recordUserInstruction(content);
+      return;
+    }
     this.prompts.push({ role, content, timestamp: Date.now() });
+    this.prunePrompts();
+  }
+
+  /**
+   * Registers a human instruction through the instruction-intent classifier.
+   * The message is classified (lexicon features → weighted score → budget
+   * extraction → topic attribution); only affirmative repetition directives
+   * open an attestation window, and the resulting profile determines WHICH
+   * calls are attested and with what stagnation budget.
+   */
+  public recordUserInstruction(instruction: string): void {
+    // Enterprise control: the "Allow Repeat Tool Calls If User Asks" console
+    // setting maps to this flag. When disabled, the breaker treats
+    // user-directed repeats like any other loop (strictest posture).
+    if (this.options.enableUserIntentAttestation === false) return;
+    this.prompts.push({ role: 'user', content: instruction, timestamp: Date.now() });
+    this.prunePrompts();
+
+    const threshold = this.options.intentDirectiveThreshold ?? 0.5;
+    const cls = MovenInstructionClassifier.classify(instruction, threshold);
+    if (cls.isRepetitionDirective) {
+      this.humanAttestUntil = Date.now() + (this.options.humanAttestationWindowMs ?? 300_000);
+      this.attestation = {
+        until: this.humanAttestUntil,
+        confidence: cls.confidence,
+        kind: cls.kind,
+        repetitionAllowance: cls.maxRepetitions,
+        topicTerms: cls.topicTerms,
+        general: cls.topicTerms.length === 0,
+      };
+      MovenLogger.debug('Repetition directive attested', {
+        kind: cls.kind,
+        confidence: cls.confidence,
+        budget: cls.maxRepetitions,
+        topics: cls.topicTerms,
+      });
+    } else {
+      // Non-directive (or negation): revoke any active attestation.
+      this.humanAttestUntil = 0;
+      this.attestation = undefined;
+    }
+  }
+
+  private prunePrompts(): void {
+    const maxPrompts = this.options.maxPromptHistory ?? 200;
+    if (this.prompts.length > maxPrompts) {
+      this.prompts.splice(0, this.prompts.length - maxPrompts);
+    }
+  }
+
+  /** The active attestation profile, or undefined when none/expired. */
+  public getActiveAttestation(): AttestationProfile | undefined {
+    const att = this.attestation;
+    if (!att || Date.now() > att.until) return undefined;
+    return att;
+  }
+
+  /**
+   * Queues a pre-trip warning for the model. Deduplicated per
+   * (heuristic, toolName, argsHash) within a 60s window so the same nudge is
+   * never injected twice; bounded to the 5 most recent warnings.
+   */
+  public pushWarning(w: Omit<MovenGuardWarning, 'id' | 'createdAt'>): void {
+    const now = Date.now();
+    const dedupKey = `${w.heuristic}|${w.toolName || ''}|${w.argsHash || ''}`;
+    this.pendingWarnings = this.pendingWarnings.filter((existing) => {
+      const expired = now - existing.createdAt > 60_000;
+      const duplicate = `${existing.heuristic}|${existing.toolName || ''}|${existing.argsHash || ''}` === dedupKey;
+      return !expired && !duplicate;
+    });
+    this.pendingWarnings.push({
+      ...w,
+      id: `warn_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: now,
+    });
+    if (this.pendingWarnings.length > 5) {
+      this.pendingWarnings.splice(0, this.pendingWarnings.length - 5);
+    }
+  }
+
+  /** Drains all pending warnings (for injection into the next model call). */
+  public drainWarnings(): MovenGuardWarning[] {
+    const drained = this.pendingWarnings;
+    this.pendingWarnings = [];
+    return drained;
+  }
+
+  /** Warnings currently queued (non-destructive peek, for dashboards/tests). */
+  public peekWarnings(): MovenGuardWarning[] {
+    return [...this.pendingWarnings];
+  }
+
+  /**
+   * Decides whether a specific tool call is covered by the active
+   * attestation. A directive WITH topic terms ("poll the build") only
+   * attests calls whose tool name/args match those terms; a general
+   * directive ("do it again") attests the current call pattern as a whole.
+   */
+  public isCallAttested(toolName: string, args: any): boolean {
+    const att = this.getActiveAttestation();
+    if (!att) return false;
+    if (att.general) return true;
+    const callTerms = extractCallTerms(toolName, args, (a) => MovenAdaptiveLoopEngine.extractQueryString(a));
+    return termOverlap(att.topicTerms, callTerms) >= 0.15;
   }
 
   public getModel(): string {
@@ -370,32 +647,36 @@ export class MovenRunState {
   }
 
   public updateOptions(newRules: Partial<MovenOptions>) {
-    if (newRules.maxRepeatCalls !== undefined) this.options.maxRepeatCalls = newRules.maxRepeatCalls;
-    if (newRules.maxCostDollar !== undefined) this.options.maxCostDollar = newRules.maxCostDollar;
-    if (newRules.maxDepth !== undefined) this.options.maxDepth = newRules.maxDepth;
-    if (newRules.maxNoProgressTurns !== undefined) this.options.maxNoProgressTurns = newRules.maxNoProgressTurns;
-    if (newRules.cheaperModel !== undefined) this.options.cheaperModel = newRules.cheaperModel;
-    if (newRules.autoFallbackCheaperModel !== undefined) this.options.autoFallbackCheaperModel = newRules.autoFallbackCheaperModel;
-    if (newRules.enableLlmJudgeArbitrator !== undefined) this.options.enableLlmJudgeArbitrator = newRules.enableLlmJudgeArbitrator;
-    if (newRules.enableSemanticCache !== undefined) this.options.enableSemanticCache = newRules.enableSemanticCache;
-    if (newRules.semanticCache !== undefined) this.options.semanticCache = { ...this.options.semanticCache, ...newRules.semanticCache };
-    if (newRules.semanticFingerprint !== undefined) this.options.semanticFingerprint = { ...this.options.semanticFingerprint, ...newRules.semanticFingerprint };
-    if (newRules.maxErrorRatePct !== undefined) this.options.maxErrorRatePct = newRules.maxErrorRatePct;
-    if (newRules.maxSlowCallLatencyMs !== undefined) this.options.maxSlowCallLatencyMs = newRules.maxSlowCallLatencyMs;
-    if (newRules.maxSlowCallRatePct !== undefined) this.options.maxSlowCallRatePct = newRules.maxSlowCallRatePct;
-    if (newRules.maxSchemaValidationFailures !== undefined) this.options.maxSchemaValidationFailures = newRules.maxSchemaValidationFailures;
-    if (newRules.maxTokensPerStep !== undefined) this.options.maxTokensPerStep = newRules.maxTokensPerStep;
-    if (newRules.enableStructuralValidation !== undefined) this.options.enableStructuralValidation = newRules.enableStructuralValidation;
-    if (newRules.enableGlobalBackoff !== undefined) this.options.enableGlobalBackoff = newRules.enableGlobalBackoff;
-    if (newRules.slidingWindowRequests !== undefined) this.options.slidingWindowRequests = newRules.slidingWindowRequests;
-    if (newRules.safeToRetryTools !== undefined) this.options.safeToRetryTools = newRules.safeToRetryTools;
-    if (newRules.pollingTtlSeconds !== undefined) this.options.pollingTtlSeconds = newRules.pollingTtlSeconds;
-    if (newRules.readOnlyTools !== undefined) this.options.readOnlyTools = newRules.readOnlyTools;
-    if (newRules.dryRun !== undefined) this.options.dryRun = newRules.dryRun;
-    if (newRules.pauseOnTrip !== undefined) this.options.pauseOnTrip = newRules.pauseOnTrip;
-    if (newRules.percentileStepBaseline !== undefined) this.options.percentileStepBaseline = newRules.percentileStepBaseline;
-    if (newRules.promptFirewall !== undefined) this.options.promptFirewall = { ...this.options.promptFirewall, ...newRules.promptFirewall };
-    if (newRules.layer2 !== undefined) this.options.layer2 = { ...this.options.layer2, ...newRules.layer2 };
+    // Same enterprise clamping as the constructor — dynamic policy updates
+    // from the cloud can never inject an invalid threshold either.
+    const clamped = validateAndClampOptions(newRules as MovenOptions);
+    if (clamped.maxRepeatCalls !== undefined) this.options.maxRepeatCalls = clamped.maxRepeatCalls;
+    if (clamped.maxCostDollar !== undefined) this.options.maxCostDollar = clamped.maxCostDollar;
+    if (clamped.maxDepth !== undefined) this.options.maxDepth = clamped.maxDepth;
+    if (clamped.maxNoProgressTurns !== undefined) this.options.maxNoProgressTurns = clamped.maxNoProgressTurns;
+    if (clamped.cheaperModel !== undefined) this.options.cheaperModel = clamped.cheaperModel;
+    if (clamped.fallbackModel !== undefined) this.options.fallbackModel = clamped.fallbackModel;
+    if (clamped.autoFallbackCheaperModel !== undefined) this.options.autoFallbackCheaperModel = clamped.autoFallbackCheaperModel;
+    if (clamped.softCostCeiling !== undefined) this.options.softCostCeiling = clamped.softCostCeiling;
+    if (clamped.enableSemanticCache !== undefined) this.options.enableSemanticCache = clamped.enableSemanticCache;
+    if (clamped.semanticCache !== undefined) this.options.semanticCache = { ...this.options.semanticCache, ...clamped.semanticCache };
+    if (clamped.semanticFingerprint !== undefined) this.options.semanticFingerprint = { ...this.options.semanticFingerprint, ...clamped.semanticFingerprint };
+    if (clamped.maxErrorRatePct !== undefined) this.options.maxErrorRatePct = clamped.maxErrorRatePct;
+    if (clamped.maxSlowCallLatencyMs !== undefined) this.options.maxSlowCallLatencyMs = clamped.maxSlowCallLatencyMs;
+    if (clamped.maxSlowCallRatePct !== undefined) this.options.maxSlowCallRatePct = clamped.maxSlowCallRatePct;
+    if (clamped.maxSchemaValidationFailures !== undefined) this.options.maxSchemaValidationFailures = clamped.maxSchemaValidationFailures;
+    if (clamped.maxTokensPerStep !== undefined) this.options.maxTokensPerStep = clamped.maxTokensPerStep;
+    if (clamped.enableStructuralValidation !== undefined) this.options.enableStructuralValidation = clamped.enableStructuralValidation;
+    if (clamped.enableGlobalBackoff !== undefined) this.options.enableGlobalBackoff = clamped.enableGlobalBackoff;
+    if (clamped.slidingWindowRequests !== undefined) this.options.slidingWindowRequests = clamped.slidingWindowRequests;
+    if (clamped.safeToRetryTools !== undefined) this.options.safeToRetryTools = clamped.safeToRetryTools;
+    if (clamped.pollingTtlSeconds !== undefined) this.options.pollingTtlSeconds = clamped.pollingTtlSeconds;
+    if (clamped.readOnlyTools !== undefined) this.options.readOnlyTools = clamped.readOnlyTools;
+    if (clamped.dryRun !== undefined) this.options.dryRun = clamped.dryRun;
+    if (clamped.pauseOnTrip !== undefined) this.options.pauseOnTrip = clamped.pauseOnTrip;
+    if (clamped.percentileStepBaseline !== undefined) this.options.percentileStepBaseline = clamped.percentileStepBaseline;
+    if (clamped.promptFirewall !== undefined) this.options.promptFirewall = { ...this.options.promptFirewall, ...clamped.promptFirewall };
+    if (clamped.layer2 !== undefined) this.options.layer2 = { ...this.options.layer2, ...clamped.layer2 };
   }
 
   public getCheaperModel(providerOrModel?: string): string {
@@ -432,14 +713,15 @@ export class MovenRunState {
       '';
 
     // 5. Build the final model ID based on the routing layer
+    const fallbackJudgeModel = this.options.fallbackModel || this.options.judgeModel || 'google/gemini-2.5-flash-lite';
     if (routingLayer === 'openrouter') {
       // OpenRouter needs full "author/model" slugs
       if (cheaperBare) {
         // If cheaperBare already contains a slash it's already namespaced
         return cheaperBare.includes('/') ? cheaperBare : `${author}/${cheaperBare}`;
       }
-      // Fallback to judge model on OpenRouter
-      return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
+      // Fallback to the configured fallback model on OpenRouter
+      return fallbackJudgeModel;
     }
 
     // 6. Native provider SDK (openai, anthropic, google, groq, mistral, cohere…)
@@ -455,7 +737,7 @@ export class MovenRunState {
     }
 
     // Absolute fallback
-    return this.options.judgeModel || 'google/gemini-2.5-flash-lite';
+    return this.options.fallbackModel || this.options.judgeModel || 'google/gemini-2.5-flash-lite';
   }
 
   public isSafeToRetryTool(toolName: string): boolean {
@@ -510,6 +792,22 @@ export class MovenRunState {
     }
   }
 
+  /**
+   * Single-flight kill guard. Returns true exactly once per run — concurrent
+   * trippers get false and must skip duplicate side effects (banner, onKill,
+   * cooldown, kill event) while still throwing their own MovenKillError.
+   */
+  public markKillInitiated(): boolean {
+    if (this.killInitiated) return false;
+    this.killInitiated = true;
+    return true;
+  }
+
+  /** True once any kill path has begun for this run (single-flight guard). */
+  public isKillInitiated(): boolean {
+    return this.killInitiated;
+  }
+
   public recordToolCall(toolName: string, args: any): ToolCallLog {
     const argsHash = this.hashArguments(toolName, args);
 
@@ -534,6 +832,7 @@ export class MovenRunState {
 
     const isPollingTool = this.isSafeToRetryTool(toolName);
     const isReadOnly = this.isReadOnlyTool(toolName);
+    const humanAttested = this.isCallAttested(toolName, args);
     this.depth += 1;
 
     // 1. Calculate actual / estimated tokens for this step
@@ -565,6 +864,7 @@ export class MovenRunState {
       depth: this.depth,
       isPollingTool,
       isReadOnly,
+      humanAttested,
       promptTokens,
       completionTokens,
       tokens: costData.totalTokens,
@@ -572,10 +872,23 @@ export class MovenRunState {
     };
     this.toolCalls.push(log);
 
+    // Bounded ledger: keep the newest N entries. The repeat-detection window
+    // (default 60s) and polling TTL scans operate on recent history, so this
+    // prune never weakens detection — it only caps worst-case memory.
+    const maxToolCalls = this.options.maxToolCallHistory ?? 500;
+    if (this.toolCalls.length > maxToolCalls) {
+      this.toolCalls.splice(0, this.toolCalls.length - maxToolCalls);
+    }
+
     this.cumulativePromptTokens += promptTokens;
     this.cumulativeCompletionTokens += completionTokens;
     this.cumulativeTotalTokens += costData.totalTokens;
     this.cumulativeCost += costData.stepCost;
+    MovenOvernightBurnGuard.recordSpend(this, costData.stepCost);
+
+    // Consume one fallback grace step per tool call (loop-detection
+    // heuristics stay suppressed while grace remains)
+    if (this.fallbackGraceSteps > 0) this.fallbackGraceSteps -= 1;
 
     // Snapshot Ctrl+Z step checkpoint — immutable deep copy of the FULL
     // in-process orchestration state (context, scratchpad, retry counters,
@@ -681,6 +994,8 @@ export class MovenRunState {
       // Hash turn state for no-progress heuristic
       const turnHash = this.hashStateTurn(log.toolName, res);
       this.stateHashes.push(turnHash);
+      // Bounded: only the most recent hashes feed no-progress / soft-ceiling checks
+      if (this.stateHashes.length > 100) this.stateHashes.splice(0, this.stateHashes.length - 100);
 
       // Compute and store the goal-state hash (intent + result) for Semantic Fingerprint
       const intentText = log.reasoning || log.toolName;
@@ -833,6 +1148,7 @@ export class MovenRunState {
       customCompletionRatePerMillion: this.options.completionCostPerMillion,
     });
     this.cumulativeCost += costData.stepCost;
+    MovenOvernightBurnGuard.recordSpend(this, costData.stepCost);
   }
 
   public getRecentErrorRate(): number {
@@ -871,16 +1187,10 @@ export class MovenRunState {
     }
   }
 
-  /**
-   * Returns true if the given tool name is declared as high-risk by the user,
-   * meaning the async LLM Judge must confirm progress before it executes.
-   */
-  public isHighRiskTool(toolName: string): boolean {
-    return (this.options.highRiskTools ?? []).includes(toolName);
-  }
-
   public addCost(cost: number) {
+    if (cost <= 0) return;
     this.cumulativeCost += cost;
+    MovenOvernightBurnGuard.recordSpend(this, cost);
   }
 
   public getMetrics(): MovenKillMetrics {
@@ -940,9 +1250,12 @@ export class MovenRunState {
           return this.options.maxRepeatCalls ? this.options.maxRepeatCalls + 1 : 10;
         }
 
-        // If results are actively changing or within TTL, do NOT treat as stagnant loop!
+        // Polling whitelist applies ONLY while the result state is actually
+        // progressing (pending -> building -> done). A stagnant poll whose
+        // output hash never changes falls through to the normal result-delta
+        // repeat counting below, so it trips like any other looping tool.
         const hasProgressiveResults = pollingCalls.some(c => c.isResultProgressive);
-        if (hasProgressiveResults || totalPollDurationSec <= ttlSec) {
+        if (hasProgressiveResults) {
           return 1; // Valid non-stagnant polling
         }
       }
@@ -1028,7 +1341,10 @@ export class MovenRunState {
       const canonical = this.canonicalStringify({ toolName, result });
       return crypto.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
     } catch {
-      return `turn_${Date.now()}`;
+      // DETERMINISTIC fallback — a unique-per-call value here would silently
+      // disable no-progress detection (same rule as hashArguments above).
+      const canonical = stableHashInput({ toolName, result });
+      return crypto.createHash('sha256').update(canonical).digest('hex').substring(0, 16);
     }
   }
 
@@ -1044,7 +1360,7 @@ export class MovenRunState {
     metadata: Record<string, any>;
   } {
     const isKilled = options?.isKilled ?? false;
-    const model = this.getModel() || this.options.model || this.options.currentModel || this.options.judgeModel || 'deepseek/deepseek-chat';
+    const model = this.getModel() || this.options.model || this.options.currentModel || this.options.fallbackModel || 'deepseek/deepseek-chat';
     const provider = this.options.provider || 'openrouter';
     const checkpoints = this.checkpointManager.getCheckpoints();
     const lastCheckpoint = checkpoints[checkpoints.length - 1];

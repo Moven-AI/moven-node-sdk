@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.wrapCerebrasTools = exports.wrapDeepInfraTools = exports.wrapFireworksTools = exports.wrapTogetherTools = exports.wrapDeepSeekTools = exports.wrapPerplexityTools = exports.wrapXAITools = exports.wrapProviderTools = exports.movenGuard = exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenDynamicPricingEngine = exports.MovenReporter = exports.MovenKillHandler = exports.MovenKillError = exports.MovenPromptInjectionFirewall = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticEmbeddingCache = exports.SemanticCanonicalizer = exports.SemanticPolicyEngine = exports.TinySemanticClassifier = exports.SemanticFeatureEngine = exports.MovenMrlEmbedder = exports.SemanticMemoryManager = exports.MovenLayer2Guard = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenRewindEngine = exports.snapshotState = exports.MovenCompensationRegistry = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
-exports.moven = exports.wrapHuggingFaceTools = exports.wrapYiTools = exports.wrapZhipuTools = exports.wrapQwenTools = exports.wrapMoonshotTools = exports.wrapNvidiaNimTools = exports.wrapSambaNovaTools = void 0;
+exports.wrapOpenAIToolRunner = exports.wrapGroqTools = exports.wrapCohereTools = exports.wrapMistralTools = exports.wrapGoogleGeminiTools = exports.wrapLlamaIndexTools = exports.wrapAutoGenTools = exports.wrapCrewAITools = exports.wrapLangChainTools = exports.createMovenCircuitBreaker = exports.wrapToolsWithMoven = exports.MovenDynamicPricingEngine = exports.MovenReporter = exports.MovenKillHandler = exports.MovenVerifier = exports.recordRewindSpan = exports.recordDecisionSpan = exports.recordToolCallSpan = exports.MovenOtelExporter = exports.buildWarningText = exports.withMovenWarnings = exports.wrapModelWithMoven = exports.createMovenLangGraphGuard = exports.termOverlap = exports.extractCallTerms = exports.extractTopicTerms = exports.MovenInstructionClassifier = exports.MovenLogger = exports.MovenPauseError = exports.MovenKillError = exports.MovenPromptInjectionFirewall = exports.MovenHallucinationDetector = exports.MovenHeuristicsEngine = exports.SemanticEmbeddingCache = exports.SemanticCanonicalizer = exports.SemanticPolicyEngine = exports.TinySemanticClassifier = exports.SemanticFeatureEngine = exports.MovenMrlEmbedder = exports.SemanticMemoryManager = exports.MovenLayer2Guard = exports.SemanticFingerprintEngine = exports.MovenSemanticCacheEngine = exports.MovenOvernightBurnGuard = exports.MovenRewindEngine = exports.snapshotState = exports.MovenCompensationRegistry = exports.MovenCheckpointManager = exports.DEFAULT_CHEAPER_MODEL_MAP = exports.MovenRunState = void 0;
+exports.moven = exports.wrapHuggingFaceTools = exports.wrapYiTools = exports.wrapZhipuTools = exports.wrapQwenTools = exports.wrapMoonshotTools = exports.wrapNvidiaNimTools = exports.wrapSambaNovaTools = exports.wrapCerebrasTools = exports.wrapDeepInfraTools = exports.wrapFireworksTools = exports.wrapTogetherTools = exports.wrapDeepSeekTools = exports.wrapPerplexityTools = exports.wrapXAITools = exports.wrapProviderTools = exports.movenGuard = exports.wrapCustomToolRegistry = exports.wrapCustomTool = exports.wrapOllamaTools = exports.wrapBedrockTools = exports.wrapAzureOpenAITools = exports.wrapAnthropicToolUse = void 0;
 exports.defineConfig = defineConfig;
 var run_state_1 = require("./core/run-state");
 Object.defineProperty(exports, "MovenRunState", { enumerable: true, get: function () { return run_state_1.MovenRunState; } });
@@ -36,6 +36,31 @@ var prompt_firewall_1 = require("./core/prompt-firewall");
 Object.defineProperty(exports, "MovenPromptInjectionFirewall", { enumerable: true, get: function () { return prompt_firewall_1.MovenPromptInjectionFirewall; } });
 var errors_1 = require("./core/errors");
 Object.defineProperty(exports, "MovenKillError", { enumerable: true, get: function () { return errors_1.MovenKillError; } });
+Object.defineProperty(exports, "MovenPauseError", { enumerable: true, get: function () { return errors_1.MovenPauseError; } });
+// Production-grade logging (level control, pluggable transports, JSON mode)
+var logger_1 = require("./core/logger");
+Object.defineProperty(exports, "MovenLogger", { enumerable: true, get: function () { return logger_1.MovenLogger; } });
+// Instruction-intent classifier (human-directed repetition detection)
+var intent_classifier_1 = require("./core/intent-classifier");
+Object.defineProperty(exports, "MovenInstructionClassifier", { enumerable: true, get: function () { return intent_classifier_1.MovenInstructionClassifier; } });
+Object.defineProperty(exports, "extractTopicTerms", { enumerable: true, get: function () { return intent_classifier_1.extractTopicTerms; } });
+Object.defineProperty(exports, "extractCallTerms", { enumerable: true, get: function () { return intent_classifier_1.extractCallTerms; } });
+Object.defineProperty(exports, "termOverlap", { enumerable: true, get: function () { return intent_classifier_1.termOverlap; } });
+// LangGraph / LangChain guard: model-level pre-trip warnings + tool interception
+var langgraph_1 = require("./adapters/langgraph");
+Object.defineProperty(exports, "createMovenLangGraphGuard", { enumerable: true, get: function () { return langgraph_1.createMovenLangGraphGuard; } });
+Object.defineProperty(exports, "wrapModelWithMoven", { enumerable: true, get: function () { return langgraph_1.wrapModelWithMoven; } });
+Object.defineProperty(exports, "withMovenWarnings", { enumerable: true, get: function () { return langgraph_1.withMovenWarnings; } });
+Object.defineProperty(exports, "buildWarningText", { enumerable: true, get: function () { return langgraph_1.buildWarningText; } });
+// OpenTelemetry export (OTLP/HTTP JSON + @opentelemetry/api bridge)
+var otel_1 = require("./otel");
+Object.defineProperty(exports, "MovenOtelExporter", { enumerable: true, get: function () { return otel_1.MovenOtelExporter; } });
+Object.defineProperty(exports, "recordToolCallSpan", { enumerable: true, get: function () { return otel_1.recordToolCallSpan; } });
+Object.defineProperty(exports, "recordDecisionSpan", { enumerable: true, get: function () { return otel_1.recordDecisionSpan; } });
+Object.defineProperty(exports, "recordRewindSpan", { enumerable: true, get: function () { return otel_1.recordRewindSpan; } });
+// Policy regression verification (CI: `moven verify`)
+var verify_1 = require("./verify");
+Object.defineProperty(exports, "MovenVerifier", { enumerable: true, get: function () { return verify_1.MovenVerifier; } });
 var abort_1 = require("./kill/abort");
 Object.defineProperty(exports, "MovenKillHandler", { enumerable: true, get: function () { return abort_1.MovenKillHandler; } });
 var reporter_1 = require("./reporter");

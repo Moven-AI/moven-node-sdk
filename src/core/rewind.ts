@@ -17,6 +17,7 @@
 import type { MovenRunState } from './run-state';
 import type { AgentCheckpointState, CompensationEntry } from './checkpoint';
 import type { MovenReporter } from '../reporter';
+import { recordRewindSpan, MovenOtelExporter } from '../otel';
 
 export type RewindOutcome = 'reversed' | 'never_executed' | 'manual_review';
 
@@ -302,6 +303,25 @@ export class MovenRewindEngine {
     if (options.report !== false && reporter) {
       reporter.reportRewindReceipt(receipt, state).catch(() => {});
     }
+
+    recordRewindSpan({
+      runId: state.runId,
+      agentId: state.agentId,
+      agentName: state.agentName,
+      toolName: offendingTool,
+      reason: state.haltReason,
+      durationMs: receipt.durationMs,
+      startedAt: start,
+      error: needsManualReview.length > 0,
+      attributes: {
+        'moven.receipt_id': receipt.receiptId,
+        'moven.reversed': receipt.fullyReversed,
+        'moven.cancelled': receipt.cancelledQueued,
+        'moven.manual_review': needsManualReview.length,
+        'moven.cooldown_seconds': cooldownSeconds,
+      },
+    });
+    void MovenOtelExporter.flush();
 
     return receipt;
   }

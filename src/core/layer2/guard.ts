@@ -3,7 +3,7 @@ import { MovenMrlEmbedder } from './mrl-embedder';
 import { SemanticMemoryManager } from './memory';
 import { SemanticFeatureEngine } from './features';
 import { TinySemanticClassifier } from './classifier';
-import { SemanticPolicyEngine } from './policy';
+import { SemanticPolicyEngine, HysteresisHolder } from './policy';
 import {
   SemanticActionInput,
   Layer2DecisionResult,
@@ -16,6 +16,11 @@ export class MovenLayer2Guard {
   public options: Layer2Options;
   public agentId: string;
   private zeroProgressStreak: number = 0;
+  /**
+   * Hysteresis scoped to THIS guard instance (i.e. this run) — one bad run
+   * can no longer poison future runs, and no cross-run static map leaks.
+   */
+  private hysteresis: HysteresisHolder = { state: 'NORMAL' };
 
   constructor(agentId: string = 'default_agent', options?: Layer2Options) {
     this.agentId = agentId;
@@ -118,7 +123,8 @@ export class MovenLayer2Guard {
       this.options,
       toolPolicy,
       elapsedUs,
-      false
+      false,
+      this.hysteresis
     );
 
     // Track zero progress streak

@@ -54,7 +54,10 @@ export class MovenHallucinationDetector {
       const prevCall = calls[calls.length - 2];
       if (prevCall.result) {
         const resultStr = typeof prevCall.result === 'string' ? prevCall.result : safeStringify(prevCall.result);
-        const isErrorResult = /404|not found|enoent|does not exist|access denied|unauthorized|failed/i.test(resultStr);
+        // Word-bounded status codes so IDs/amounts like '1404' or
+        // 'ticket_40423' never match; explicit not-found phrases instead of
+        // a bare 'failed' substring.
+        const isErrorResult = /\b(400|401|403|404|410|422|500|502|503)\b|not found|does not exist|no such|enoent|unauthorized|access denied|permission denied/i.test(resultStr);
 
         if (isErrorResult) {
           // Extract argument values present in both calls (e.g., resource IDs)
@@ -76,9 +79,12 @@ export class MovenHallucinationDetector {
 
           for (const val of prevValues) {
             if (currentArgsStr.includes(val)) {
-              // Count how many consecutive times this failed resource is pursued
+              // Count how many consecutive times this failed resource is pursued.
+              // prev call + current call = 2 → ONE legitimate retry (e.g.
+              // eventual consistency, transient 404) is still allowed; the
+              // breaker fires from the THIRD pursuit onwards.
               const failedPursuits = calls.filter(c => safeStringify(c.args).includes(val)).length;
-              if (failedPursuits >= 2) {
+              if (failedPursuits >= 3) {
                 return {
                   tripped: true,
                   hallucinationType: 'phantom_resource',

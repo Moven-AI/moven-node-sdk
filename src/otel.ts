@@ -234,7 +234,7 @@ export class MovenOtelExporter {
           },
           scopeSpans: [
             {
-              scope: { name: 'moven-sdk', version: '0.3.0' },
+              scope: { name: 'moven-sdk', version: '0.5.0' },
               spans: batch.map(q => ({
                 traceId: q.traceId,
                 spanId: q.spanId,
